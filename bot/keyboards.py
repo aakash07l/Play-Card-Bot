@@ -1,6 +1,6 @@
 """
 Telegram inline keyboards for the PlayStation 4K Gift Card Buyer Bot.
-Provides rich interactive UI buttons for 4K auto-sniper, multi-account management, and live purchases.
+Provides rich interactive UI buttons for platform selection, denominations, login modes, and confirmations.
 """
 
 from typing import List, Dict, Any, Optional
@@ -12,19 +12,19 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [
             InlineKeyboardButton("🎯 Auto-Snipe ₹4,000 PSN (24/7)", callback_data=f"snipe_denom:rooter:{config.TARGET_DENOMINATION}"),
-            InlineKeyboardButton("🛒 Instant Buy ₹4K Card", callback_data=f"confirm_buy:rooter:{config.TARGET_DENOMINATION}"),
+            InlineKeyboardButton("🛒 Instant Buy ₹4K PSN", callback_data=f"confirm_buy:rooter:{config.TARGET_DENOMINATION}"),
         ],
         [
-            InlineKeyboardButton("👥 Manage Accounts (Multi-Account)", callback_data="accounts_view"),
-            InlineKeyboardButton("📊 Status & Live Balances", callback_data="status_check"),
+            InlineKeyboardButton("👥 Manage Accounts (5-10 AC)", callback_data="accounts_view"),
+            InlineKeyboardButton("📊 Status & Sessions", callback_data="status_check"),
         ],
         [
             InlineKeyboardButton("🛑 Stop Auto-Sniper", callback_data="stop_snipe_action"),
             InlineKeyboardButton("⚙️ Toggle Sim Mode", callback_data="toggle_sim"),
         ],
         [
-            InlineKeyboardButton("🔑 Add Account / Token", callback_data="acc_add_prompt"),
-            InlineKeyboardButton("📖 Help & Commands", callback_data="help_info"),
+            InlineKeyboardButton("🔑 Account Login / Token", callback_data="login_start"),
+            InlineKeyboardButton("📖 Help & Guide", callback_data="help_info"),
         ],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -48,7 +48,7 @@ def get_accounts_keyboard(accounts: List[Dict[str, Any]]) -> InlineKeyboardMarku
         ])
     rows.append([
         InlineKeyboardButton("🎯 Start 4K Auto-Sniper", callback_data=f"snipe_denom:rooter:{config.TARGET_DENOMINATION}"),
-        InlineKeyboardButton("🔙 Main Menu", callback_data="nav_main_menu"),
+        InlineKeyboardButton("🔙 Back to Main Menu", callback_data="nav_main_menu"),
     ])
     return InlineKeyboardMarkup(rows)
 
@@ -60,7 +60,7 @@ def get_stop_snipe_keyboard() -> InlineKeyboardMarkup:
     ])
 
 def get_playstore_stopped_keyboard() -> InlineKeyboardMarkup:
-    """Keyboard displayed after stopping auto-sniper."""
+    """Keyboard displayed after stopping sniper."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🎯 Restart 4K PlayStation Sniper", callback_data=f"snipe_denom:rooter:{config.TARGET_DENOMINATION}")],
         [InlineKeyboardButton("🔙 Back to Main Menu", callback_data="nav_main_menu")],
@@ -82,10 +82,10 @@ def get_login_methods_keyboard(platform: str = "rooter") -> InlineKeyboardMarkup
     """Keyboard to pick login method: interactive Phone+OTP or Paste Session Cookies."""
     keyboard = [
         [
-            InlineKeyboardButton("🍪 Paste Bearer Token / Cookies", callback_data="login_method:rooter:cookie"),
+            InlineKeyboardButton("📱 Interactive Phone + OTP", callback_data="login_method:rooter:phone"),
         ],
         [
-            InlineKeyboardButton("📱 Interactive Phone + OTP", callback_data="login_method:rooter:phone"),
+            InlineKeyboardButton("🍪 Paste Cookie / Session JSON", callback_data="login_method:rooter:cookie"),
         ],
         [
             InlineKeyboardButton("🔙 Back to Main Menu", callback_data="nav_main_menu"),
@@ -94,7 +94,7 @@ def get_login_methods_keyboard(platform: str = "rooter") -> InlineKeyboardMarkup
     return InlineKeyboardMarkup(keyboard)
 
 def get_denominations_keyboard(platform: str = "rooter", denominations: List[int] = None) -> InlineKeyboardMarkup:
-    """Keyboard to pick PlayStation voucher denomination (₹4,000 Only)."""
+    """Keyboard to pick PlayStation voucher denomination (₹4,000 Exclusively)."""
     rows = [
         [
             InlineKeyboardButton(f"🎮 ₹{config.TARGET_DENOMINATION:,} PSN Card", callback_data=f"denom_pick:rooter:{config.TARGET_DENOMINATION}"),
@@ -107,7 +107,7 @@ def get_denominations_keyboard(platform: str = "rooter", denominations: List[int
     return InlineKeyboardMarkup(rows)
 
 def get_snipe_denominations_keyboard(platform: str = "rooter", denominations: List[int] = None) -> InlineKeyboardMarkup:
-    """Keyboard to pick voucher denomination for Auto-Sniper (₹4,000 Only)."""
+    """Keyboard to pick voucher denomination for Auto-Sniper (₹4,000 Exclusively)."""
     rows = [
         [
             InlineKeyboardButton(f"🎯 Auto-Snipe ₹{config.TARGET_DENOMINATION:,} PlayStation Card", callback_data=f"snipe_denom:rooter:{config.TARGET_DENOMINATION}"),

@@ -72,7 +72,7 @@ class RooterService(BasePlatform):
         """Logs into Rooter via mobile number and SMS OTP."""
         try:
             if progress_callback:
-                await progress_callback("Navigating to Rooter login...", "🔍")
+                await progress_callback("Navigating to Rooter login...", "≡ƒöì")
 
             await page.goto(self.base_url, timeout=config.BROWSER_TIMEOUT_MS)
             await page.wait_for_load_state("networkidle")
@@ -93,7 +93,7 @@ class RooterService(BasePlatform):
             await get_otp_btn.click()
 
             if progress_callback:
-                await progress_callback(f"OTP sent to +91 {clean_phone}. Please reply with OTP in chat...", "📩")
+                await progress_callback(f"OTP sent to +91 {clean_phone}. Please reply with OTP in chat...", "≡ƒô⌐")
 
             # Await OTP code from user
             otp_code = await otp_callback()
@@ -122,7 +122,7 @@ class RooterService(BasePlatform):
 
             await page.wait_for_load_state("networkidle", timeout=10000)
             if progress_callback:
-                await progress_callback("Rooter account verified successfully!", "✅")
+                await progress_callback("Rooter account verified successfully!", "Γ£à")
             return True
 
         except Exception as e:
@@ -142,7 +142,7 @@ class RooterService(BasePlatform):
         if denomination == 10:
             in_stock = await self.check_is_in_stock(page, 10)
             cards.append(CardItem(
-                title="Google Play Recharge Code ₹10",
+                title="Google Play Recharge Code Γé╣10",
                 denomination=10,
                 price=8.0,
                 platform="rooter",
@@ -153,22 +153,12 @@ class RooterService(BasePlatform):
         target_url = self.playstation_url
         if target_url not in page.url:
             if progress_callback:
-                await progress_callback("Opening Rooter PlayStation Gift Cards page...", "🔍")
+                await progress_callback("Opening Rooter PlayStation Gift Cards page...", "≡ƒöì")
             await page.goto(target_url, timeout=config.BROWSER_TIMEOUT_MS)
             await page.wait_for_load_state("domcontentloaded")
             await page.wait_for_timeout(1000)
 
-        # Include Google Play ₹10 test option if searching all
-        if not denomination:
-            cards.append(CardItem(
-                title="Google Play Recharge Code ₹10 (Test)",
-                denomination=10,
-                price=8.0,
-                platform="rooter",
-                in_stock=True,
-            ))
-
-        supported = [1000, 2000, 3000, 4000, 5000]
+        supported = [getattr(config, "TARGET_DENOMINATION", 4000)]
         for d in supported:
             opt_locator = page.locator("div, span, p").filter(has_text=re.compile(rf"Rs\.?\s*{d}\s*Wallet Code", re.IGNORECASE))
             in_stock = False
@@ -209,7 +199,7 @@ class RooterService(BasePlatform):
             pass
 
     async def get_in_stock_playstation_denominations(self, page: Page) -> List[int]:
-        """Returns all PlayStation denominations currently in stock, sorted from highest to lowest (₹5k -> ₹1k)."""
+        """Returns all PlayStation denominations currently in stock (Target: ₹4,000)."""
         in_stock_list = []
         try:
             target_url = self.playstation_url
@@ -230,7 +220,7 @@ class RooterService(BasePlatform):
 
             await self.dismiss_location_popup(page)
 
-            # Exclusively target 4K (₹4,000) PlayStation Gift Card
+            # Dedicated ₹4,000 PlayStation Card restock target
             target_denom = getattr(config, "TARGET_DENOMINATION", 4000)
             supported = [target_denom]
             for d in supported:
@@ -242,7 +232,7 @@ class RooterService(BasePlatform):
                     target_card = denom_opt.last
                     card_text = await target_card.inner_text()
                     if "out of stock" not in card_text.lower():
-                        logger.info(f"🚨 [Rooter] In-stock candidate card found: ₹{d}!")
+                        logger.info(f"≡ƒÜ¿ [Rooter] In-stock candidate card found: Γé╣{d}!")
                         in_stock_list.append(d)
         except Exception as e:
             logger.warning(f"Error checking in-stock denominations: {e}")
@@ -250,7 +240,7 @@ class RooterService(BasePlatform):
         return in_stock_list
 
     async def find_available_playstation_denomination(self, page: Page) -> Optional[int]:
-        """Finds the highest PlayStation denomination currently in stock on Rooter (₹5k -> ₹1k)."""
+        """Finds the highest PlayStation denomination currently in stock on Rooter (Γé╣5k -> Γé╣1k)."""
         denoms = await self.get_in_stock_playstation_denominations(page)
         return denoms[0] if denoms else None
 
@@ -270,7 +260,7 @@ class RooterService(BasePlatform):
             # Auto-dismiss region popup if present
             await self.dismiss_location_popup(page)
 
-            # A. Google Play Recharge Code (₹10 Test Buy)
+            # A. Google Play Recharge Code (Γé╣10 Test Buy)
             if prod_info["type"] == "google_play":
                 try:
                     btn = await page.wait_for_selector(
@@ -282,14 +272,14 @@ class RooterService(BasePlatform):
                         if "out of stock" in txt.lower():
                             logger.info("[Rooter] Google Play is Out of Stock.")
                             return False
-                        logger.info(f"🚨 [Rooter] IN STOCK: Google Play ₹{denomination} is active ({txt.strip()})!")
+                        logger.info(f"≡ƒÜ¿ [Rooter] IN STOCK: Google Play Γé╣{denomination} is active ({txt.strip()})!")
                         return True
                 except Exception as be:
                     logger.warning(f"Could not find Google Play action button: {be}")
                     return False
                 return False
 
-            # B. PlayStation Gift Cards (₹1,000 to ₹5,000)
+            # B. PlayStation Gift Cards (Γé╣1,000 to Γé╣5,000)
             else:
                 try:
                     await page.wait_for_selector("div:has-text('Wallet Code')", timeout=8000)
@@ -308,7 +298,7 @@ class RooterService(BasePlatform):
 
                     # Check for out of stock indicator
                     if "out of stock" in card_text.lower():
-                        logger.debug(f"[Rooter] ₹{denomination} card option is labeled Out of Stock.")
+                        logger.debug(f"[Rooter] Γé╣{denomination} card option is labeled Out of Stock.")
                         return False
 
                     # Click to select denomination with force=True and short timeout
@@ -327,14 +317,14 @@ class RooterService(BasePlatform):
                         if bottom_btn:
                             btn_text = await bottom_btn.inner_text()
                             if "out of stock" not in btn_text.lower():
-                                logger.info(f"🚨 [Rooter] IN STOCK: PlayStation ₹{denomination} button is active ({btn_text})!")
+                                logger.info(f"≡ƒÜ¿ [Rooter] IN STOCK: PlayStation Γé╣{denomination} button is active ({btn_text})!")
                                 return True
                     except Exception:
                         pass
 
                     return False
 
-                logger.warning(f"[Rooter] Could not locate option card for ₹{denomination}")
+                logger.warning(f"[Rooter] Could not locate option card for Γé╣{denomination}")
                 return False
 
         except Exception as e:
@@ -358,7 +348,7 @@ class RooterService(BasePlatform):
 
             if target_url not in page.url:
                 if progress_callback:
-                    await progress_callback(f"Navigating to {prod_name} page...", "🔍")
+                    await progress_callback(f"Navigating to {prod_name} page...", "≡ƒöì")
                 await page.goto(target_url, wait_until="domcontentloaded", timeout=config.BROWSER_TIMEOUT_MS)
                 await page.wait_for_timeout(1000)
 
@@ -367,7 +357,7 @@ class RooterService(BasePlatform):
 
             # 1. Select the specific denomination
             if prod_info["type"] == "google_play":
-                # Default selection on Google Play product page is already ₹10
+                # Default selection on Google Play product page is already Γé╣10
                 pass
             else:
                 denom_opt = page.locator("div").filter(has_text=re.compile(rf"Rs\.?\s*{denomination}\s*Wallet Code", re.IGNORECASE))
@@ -384,7 +374,7 @@ class RooterService(BasePlatform):
                             denomination=denomination,
                             quantity=quantity,
                             account_label=account_label,
-                            message=f"Rooter {prod_name} ₹{denomination:,} is currently Out of Stock! Start /snipe {denomination} to automatically grab it the second it restocks.",
+                            message=f"Rooter {prod_name} Γé╣{denomination:,} is currently Out of Stock! Start /snipe {denomination} to automatically grab it the second it restocks.",
                         )
                     try:
                         await target_card.click(force=True, timeout=2500)
@@ -416,13 +406,13 @@ class RooterService(BasePlatform):
                     denomination=denomination,
                     quantity=quantity,
                     account_label=account_label,
-                    message=f"{prod_name} ₹{denomination:,} went out of stock right before checkout!",
+                    message=f"{prod_name} Γé╣{denomination:,} went out of stock right before checkout!",
                 )
 
             # 3. Handle Simulation Mode
             if simulation:
                 if progress_callback:
-                    await progress_callback(f"SIMULATION MODE: {prod_name} stock verified! Simulating dry-run purchase...", "💳")
+                    await progress_callback(f"SIMULATION MODE: {prod_name} stock verified! Simulating dry-run purchase...", "≡ƒÆ│")
                 await page.wait_for_timeout(1500)
 
                 prefix = "GOOG" if prod_info["type"] == "google_play" else "PSN"
@@ -440,14 +430,14 @@ class RooterService(BasePlatform):
                     voucher_pin=mock_pin,
                     codes=[mock_code] if quantity == 1 else [mock_code, f"{mock_code}-2"],
                     order_id=mock_order,
-                    receipt_summary=f"Rooter {prod_name} ₹{denomination:,} x{quantity} [SIMULATION]",
+                    receipt_summary=f"Rooter {prod_name} Γé╣{denomination:,} x{quantity} [SIMULATION]",
                     message="Purchase flow simulated successfully in dry-run mode. Turn off SIMULATION_MODE to purchase with real balance.",
                     simulation=True,
                 )
 
             # 4. Live Purchase Execution
             if progress_callback:
-                await progress_callback(f"Clicking Buy / Pay on {prod_name}...", "🛒")
+                await progress_callback(f"Clicking Buy / Pay on {prod_name}...", "≡ƒ¢Æ")
 
             # 1. Check if Delivery Details modal is already open
             delivery_modal = page.locator(".mantine-Modal-content, div[role='dialog'], text='Delivery Details'").first
@@ -474,7 +464,7 @@ class RooterService(BasePlatform):
             modal_pay_btn = page.locator(".mantine-Modal-content button:has-text('Pay via wallet'), div[role='dialog'] button:has-text('Pay via wallet'), button:has-text('Pay via wallet')").last
             if await modal_pay_btn.is_visible(timeout=5000):
                 if progress_callback:
-                    await progress_callback("Confirming Delivery Details & submitting order...", "📝")
+                    await progress_callback("Confirming Delivery Details & submitting order...", "≡ƒô¥")
                 logger.info("[Rooter] Clicking Pay via wallet inside modal...")
                 try:
                     await modal_pay_btn.click(force=True, timeout=5000)
@@ -630,7 +620,7 @@ class RooterService(BasePlatform):
                 voucher_pin=pin,
                 codes=codes_list,
                 order_id=order_id,
-                receipt_summary=f"Rooter {prod_name} ₹{denomination:,} x{quantity}",
+                receipt_summary=f"Rooter {prod_name} Γé╣{denomination:,} x{quantity}",
                 message=f"{prod_name} (x{quantity}) successfully purchased on Rooter with wallet balance!",
                 error_screenshot=shot_path,
                 simulation=False,

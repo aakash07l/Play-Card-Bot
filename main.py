@@ -1,4 +1,4 @@
-"""
+﻿"""
 Main entry point for PlayStation Gift Card Telegram Bot.
 Builds the Telegram Application, registers conversation handlers, and starts polling.
 """
@@ -19,7 +19,6 @@ if sys.stderr and hasattr(sys.stderr, "reconfigure"):
 
 import logging
 import asyncio
-import html
 import warnings
 from telegram.warnings import PTBUserWarning
 warnings.filterwarnings("ignore", category=PTBUserWarning)
@@ -63,7 +62,6 @@ from bot.handlers import (
     acc_remove_callback,
     add_account_command,
     set_balance_command,
-    settoken_command,
     stop_playstore_handler,
 )
 from services.browser_manager import browser_manager
@@ -203,37 +201,11 @@ def build_application():
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("accounts", accounts_command))
     app.add_handler(CommandHandler("addaccount", add_account_command))
-    app.add_handler(CommandHandler("settoken", settoken_command))
     app.add_handler(CommandHandler("setbalance", set_balance_command))
     app.add_handler(CommandHandler("stop_playstore", stop_playstore_handler))
     app.add_handler(CommandHandler("psonly", stop_playstore_handler))
     app.add_handler(CommandHandler("toggle_sim", toggle_sim_handler))
     app.add_handler(CommandHandler("cancel", cancel_flow))
-
-    # Direct JWT Bearer Token text paste listener
-    async def direct_token_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not update.effective_message or not update.effective_message.text:
-            return
-        text = update.effective_message.text.strip()
-        clean = text[7:].strip() if text.lower().startswith("bearer ") else text
-        if clean.startswith("eyJ") and len(clean) > 50 and clean.count(".") == 2:
-            from bot.handlers import is_authorized
-            uid = update.effective_user.id if update.effective_user else 0
-            if not is_authorized(uid):
-                return
-            from services.account_manager import account_manager
-            acc = await account_manager.add_account_async(token=clean)
-            await update.effective_message.reply_text(
-                f"✅ <b>Rooter Account Auto-Registered via Token!</b>\n\n"
-                f"• <b>Account:</b> {html.escape(acc.get('label', 'Account'))}\n"
-                f"• <b>User ID:</b> <code>{acc.get('user_id')}</code>\n"
-                f"• <b>Live Wallet Balance:</b> <b>₹{acc.get('wallet_balance'):,.2f}</b> (Rooter Verified 🟢)\n"
-                f"• <b>Status:</b> 🟢 Active for ₹4,000 Auto-Snipe\n\n"
-                f"Restock aane par ye account parallel me buy karega!",
-                parse_mode="HTML",
-            )
-
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, direct_token_listener), group=2)
 
     # Register navigation callbacks
     app.add_handler(CallbackQueryHandler(start_command, pattern="^nav_main_menu$"))
@@ -253,7 +225,7 @@ def build_application():
         if isinstance(update, Update) and update.effective_message:
             try:
                 await update.effective_message.reply_text(
-                    "⚠️ Something went wrong. Please send /start to reload the menu."
+                    "ΓÜá∩╕Å Something went wrong. Please send /start to reload the menu."
                 )
             except Exception:
                 pass
@@ -271,10 +243,10 @@ def main():
     app = build_application()
 
     print("\n" + "=" * 55)
-    print("🎮 PLAYSTATION GIFT CARD BUYER BOT STARTED")
-    print(f"• Mode: {'SIMULATION (Safe)' if config.SIMULATION_MODE else 'LIVE PURCHASING'}")
-    print(f"• Token Loaded: {config.BOT_TOKEN[:10]}...***")
-    print("• Listening for Telegram messages and commands...")
+    print("≡ƒÄ« PLAYSTATION GIFT CARD BUYER BOT STARTED")
+    print(f"ΓÇó Mode: {'SIMULATION (Safe)' if config.SIMULATION_MODE else 'LIVE PURCHASING'}")
+    print(f"ΓÇó Token Loaded: {config.BOT_TOKEN[:10]}...***")
+    print("ΓÇó Listening for Telegram messages and commands...")
     print("=" * 55 + "\n")
 
     try:
