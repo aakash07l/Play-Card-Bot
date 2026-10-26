@@ -936,41 +936,7 @@ async def stop_snipe_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def stop_playstore_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Redirects to stop_snipe_handler."""
     return await stop_snipe_handler(update, context)
-            target_name = "Any PlayStation Card (₹1k-₹5k)"
-        else:
-            target_name = f"PlayStation ₹{d:,}"
 
-    run_status = ""
-    if was_playstore:
-        run_status = f"🛑 <b>Active Play Store Sniper Stopped:</b> <code>{target_name}</code> has been terminated.\n\n"
-    elif was_running:
-        run_status = f"🛑 <b>Previous Monitor Stopped:</b> <code>{target_name}</code> has been paused.\n\n"
-
-    msg = (
-        "🛑 <b>Play Store Auto-Buy STOPPED!</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"{run_status}"
-        "✅ <b>PlayStation Only Mode Active:</b>\n"
-        "• <b>Play Store Gift Cards:</b> ❌ Completely Stopped & Disabled\n"
-        "• <b>Target:</b> 🎮 <b>PlayStation Gift Cards ONLY (₹1,000 to ₹5,000)</b>\n"
-        "• <b>Multi-Account Sniper:</b> Stock aane par sabhi 5-10 accounts balance-aware parallel buy karenge!\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "👇 <i>PlayStation 24/7 restock monitor start karne ke liye neeche button dabayein:</i>"
-    )
-
-    if query:
-        await query.answer("Play Store buying stopped. Only PlayStation mode active.")
-        await query.edit_message_text(
-            text=msg,
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_playstore_stopped_keyboard(),
-        )
-    else:
-        await update.message.reply_text(
-            text=msg,
-            parse_mode=ParseMode.HTML,
-            reply_markup=get_playstore_stopped_keyboard(),
-        )
 
 # ==================== LOGIN WORKFLOW ====================
 
