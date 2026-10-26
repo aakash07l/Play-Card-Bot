@@ -1,0 +1,1419 @@
+"""
+Telegram Bot handlers for commands, conversations, and interactive callbacks.
+Uses HTML ParseMode for ultra-stable, error-free formatting.
+Supports environment credentials (ROOTER_AUTH_TOKEN) and interactive flows.
+"""
+
+import html
+import asyncio
+import logging
+from typing import Dict, Any, Optional
+from telegram import Update
+from telegram.constants import ParseMode
+from telegram.ext import (
+    ContextTypes,
+    ConversationHandler,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    filters,
+)
+
+import config
+from bot.states import BotState
+from bot.keyboards import (
+    get_main_menu_keyboard,
+    get_accounts_keyboard,
+    get_platforms_keyboard,
+    get_login_methods_keyboard,
+    get_denominations_keyboard,
+    get_snipe_denominations_keyboard,
+    get_confirmation_keyboard,
+    get_alternate_platform_keyboard,
+    get_stop_snipe_keyboard,
+    get_playstore_stopped_keyboard,
+    get_cancel_keyboard,
+)
+from services.browser_manager import browser_manager
+from services.rooter_service import RooterService
+from services.base_platform import BasePlatform
+from services.account_manager import account_manager
+
+logger = logging.getLogger(__name__)
+
+# Register platform services
+PLATFORM_SERVICES: Dict[str, BasePlatform] = {
+    "rooter": RooterService(),
+}
+
+# Temporary memory store for pending interactive logins
+LOGIN_SESSIONS: Dict[int, Dict[str, Any]] = {}
+
+# Active background auto-sniper jobs {user_id: {"task": Task, "stop_event": Event, ...}}
+ACTIVE_SNIPERS: Dict[int, Dict[str, Any]] = {}
+
+def is_authorized(user_id: int) -> bool:
+    """Verifies if the sender is authorized in ADMIN_CHAT_IDS."""
+    if not config.ADMIN_CHAT_IDS:
+        return True
+    return user_id in config.ADMIN_CHAT_IDS
+
+async def broadcast_to_admins(bot, text: str, reply_markup=None, photo_path: Optional[str] = None):
+    """Broadcasts alerts, vouchers, and status messages to all authorized admin Chat IDs."""
+    targets = config.ADMIN_CHAT_IDS if config.ADMIN_CHAT_IDS else []
+    for cid in targets:
+        try:
+            if photo_path and os.path.exists(photo_path):
+                with open(photo_path, "rb") as photo:
+                    await bot.send_photo(
+                        chat_id=cid,
+                        photo=photo,
+                        caption=text,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=reply_markup,
+                    )
+            else:
+                await bot.send_message(
+                    chat_id=cid,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=reply_markup,
+                )
+        except Exception as e:
+            logger.debug(f"Broadcast to chat_id {cid} failed: {e}")
+
+def format_status_text(user_id: int) -> str:
+    """Formats current bot status for Rooter PlayStation ₹4,000 sniper in HTML."""
+    all_accs = account_manager.get_all()
+    active_accs = account_manager.get_active()
+    total_bal = account_manager.get_total_balance()
+
+    if active_accs:
+        rooter_logged = f"🟢 {len(active_accs)} Active Account{'s' if len(active_accs) > 1 else ''} (Total: ₹{total_bal:,.0f})"
+    elif config.ROOTER_AUTH_TOKEN:
+        rooter_logged = "🟢 Configured (ENV Token)"
+    elif browser_manager.has_session(user_id, "rooter"):
+        rooter_logged = "🟢 Logged In (Session)"
+    else:
+        rooter_logged = "🔴 Not Logged In"
+
+    mode_text = "🧪 Simulation (Dry Run - Safe)" if config.SIMULATION_MODE else "⚡ Live Purchasing"
+
+    sniper_running = False
+    checks = 0
+    for s_info in ACTIVE_SNIPERS.values():
+        if s_info.get("task") and not s_info["task"].done():
+            sniper_running = True
+            checks = s_info.get("attempts", 0)
+            break
+
+    if sniper_running:
+        sniper_text = f"🟢 Active (Target: ₹{config.TARGET_DENOMINATION:,} PSN - <code>{checks}</code> checks)"
+    else:
+        sniper_text = "⚪ Inactive"
+
+    admins_count = len(config.ADMIN_CHAT_IDS)
+
+    return (
+        f"🎮 <b>PlayStation 4K Auto-Buyer Bot (Rooter Shop)</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"• <b>Target Voucher:</b> 🎯 <b>PlayStation Gift Card ₹{config.TARGET_DENOMINATION:,} (4K)</b>\n"
+        f"• <b>24/7 Restock Sniper:</b> {sniper_text}\n"
+        f"• <b>Active Accounts:</b> {rooter_logged}\n"
+        f"• <b>Total Balance:</b> <b>₹{total_bal:,.0f}</b>\n"
+        f"• <b>Max Cards / Account:</b> <code>{config.MAX_CARDS_PER_ACCOUNT}</code> (₹{config.TARGET_DENOMINATION * config.MAX_CARDS_PER_ACCOUNT:,} max)\n"
+        f"• <b>Execution Mode:</b> <code>{mode_text}</code>\n"
+        f"• <b>Refresh Interval:</b> <code>{config.SNIPE_INTERVAL_SECONDS}s</code>\n"
+        f"• <b>Authorized Admins:</b> <code>{admins_count} IDs</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Jab bhi ₹4,000 card stock me aayega, sabhi active accounts parallel me instant-buy karenge aur voucher codes sabhi admin chats me broadcast ho jayenge!"
+    )
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the /start command."""
+    user = update.effective_user
+    user_id = user.id if user else 0
+    if not is_authorized(user_id):
+        unauth_msg = (
+            f"⛔ <b>Access Denied:</b> This bot is configured for authorized users only.\n"
+            f"Your Chat ID: <code>{user_id}</code>\n"
+            f"Please ask an administrator to add your Chat ID to <code>ADMIN_CHAT_IDS</code>."
+        )
+        if update.callback_query:
+            await update.callback_query.answer("Access Denied", show_alert=True)
+        elif update.effective_message:
+            await update.effective_message.reply_text(unauth_msg, parse_mode=ParseMode.HTML)
+        return
+
+    first_name = html.escape(user.first_name if user and user.first_name else "Gamer")
+
+    try:
+        await account_manager.sync_all_balances()
+    except Exception as e:
+        logger.debug(f"Live balance sync notice: {e}")
+
+    welcome_msg = (
+        f"👋 <b>Welcome, {first_name}!</b>\n\n"
+        + format_status_text(user_id)
+    )
+
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(
+            text=welcome_msg,
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_main_menu_keyboard(),
+        )
+    else:
+        await update.message.reply_text(
+            text=welcome_msg,
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_main_menu_keyboard(),
+        )
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the /help command."""
+    help_text = (
+        "📖 <b>PlayStation Buyer Bot — User Guide</b>\n\n"
+        "⚡ <b>Commands:</b>\n"
+        "• <code>/start</code> — Main dashboard & menu\n"
+        "• <code>/accounts</code> — 👥 Manage 5-10 Rooter Accounts (Auto Live Balance Sync 🟢)\n"
+        "• <code>/addaccount &lt;token&gt; [label]</code> — Add a Rooter account (Auto fetches live balance!)\n"
+        "• <code>/setbalance &lt;acc_id&gt; &lt;amount&gt;</code> — Set optional manual balance override\n"
+        "• <code>/snipe</code> — 🎯 24/7 Restock Auto-Sniper (Parallel buy across all active accounts!)\n"
+        "• <code>/stop</code> — 🛑 Stop active 24/7 restock monitoring\n"
+        "• <code>/buy</code> — Instant single purchase flow\n"
+        "• <code>/login</code> — Store platform session / Bearer Token\n"
+        "• <code>/status</code> — View current sessions, sniper status & mode\n"
+        "• <code>/toggle_sim</code> — Switch between Safe Simulation & Live Buy\n"
+        "• <code>/cancel</code> — Reset active operations\n\n"
+        "🎯 <b>Multi-Account Restock Sniper:</b>\n"
+        "1. Add your 5 to 10 Rooter accounts with <code>/addaccount</code> or the 👥 button.\n"
+        "2. Balance is automatically fetched in real-time from Rooter's live API.\n"
+        "3. Send <code>/snipe</code> -> select <b>Any PlayStation Card</b>.\n"
+        f"4. Bot checks stock every {config.SNIPE_INTERVAL_SECONDS}s. When stock lands, bot automatically picks the largest affordable denomination for each account and buys in parallel simultaneously!"
+    )
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(
+            text=help_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_main_menu_keyboard(),
+        )
+    else:
+        await update.message.reply_text(
+            text=help_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_main_menu_keyboard(),
+        )
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the /status command."""
+    user_id = update.effective_user.id if update.effective_user else 0
+    try:
+        await account_manager.sync_all_balances()
+    except Exception as e:
+        logger.debug(f"Live balance sync notice: {e}")
+    text = format_status_text(user_id)
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_main_menu_keyboard(),
+        )
+    else:
+        await update.message.reply_text(
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_main_menu_keyboard(),
+        )
+
+async def toggle_sim_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toggles simulation mode on or off."""
+    config.SIMULATION_MODE = not config.SIMULATION_MODE
+    new_state = "🧪 SIMULATION (Safe Dry Run)" if config.SIMULATION_MODE else "⚡ LIVE PURCHASING (Real Payment)"
+    msg = f"⚙️ Mode updated to: <b>{new_state}</b>"
+
+    user_id = update.effective_user.id if update.effective_user else 0
+    if update.callback_query:
+        await update.callback_query.answer(f"Switched to {new_state}")
+        await update.callback_query.edit_message_text(
+            text=f"{msg}\n\n" + format_status_text(user_id),
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_main_menu_keyboard(),
+        )
+    else:
+        await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+
+# ==================== BUY WORKFLOW ====================
+
+async def buy_start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Initiates instant purchase on Rooter Shop by asking for denomination."""
+    query = update.callback_query
+    context.user_data["buy_platform"] = "rooter"
+    msg = (
+        "🛒 <b>Instant Buy — Rooter Shop (PlayStation)</b>\n\n"
+        "Select the PlayStation Gift Card denomination to buy using your Rooter wallet balance:"
+    )
+    if query:
+        await query.answer()
+        await query.edit_message_text(
+            text=msg,
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_denominations_keyboard("rooter"),
+        )
+    else:
+        await update.message.reply_text(
+            text=msg,
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_denominations_keyboard("rooter"),
+        )
+    return BotState.SELECT_BUY_DENOMINATION
+
+async def buy_platform_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fallback handler redirecting to Rooter denomination selection."""
+    return await buy_start_handler(update, context)
+
+async def buy_denomination_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Denomination picked; show confirmation dialog."""
+    query = update.callback_query
+    await query.answer()
+
+    parts = query.data.split(":")
+    platform = parts[1]
+    denomination = int(parts[2])
+
+    if denomination < 1000:
+        await query.edit_message_text(
+            text=(
+                "⚠️ <b>Play Store Buying Disabled!</b>\n\n"
+                "Google Play recharge code buying stop aur disable kar di gayi hai.\n"
+                "Bot ab sirf PlayStation Gift Cards (₹1,000 to ₹5,000) buy karne ke liye configured hai."
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_playstore_stopped_keyboard(),
+        )
+        return ConversationHandler.END
+
+    context.user_data["buy_platform"] = platform
+    context.user_data["buy_denomination"] = denomination
+
+    plat_name = config.PLATFORMS.get(platform, {}).get("name", platform.title())
+    mode_text = "🧪 SIMULATION (No funds deducted)" if config.SIMULATION_MODE else "⚡ LIVE (Real Checkout)"
+    prod_name = "PlayStation Gift Card"
+    price_tag = f"₹{denomination:,}"
+
+    await query.edit_message_text(
+        text=(
+            f"📝 <b>Order Confirmation</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"• <b>Item:</b> {prod_name}\n"
+            f"• <b>Platform:</b> {plat_name}\n"
+            f"• <b>Denomination:</b> ₹{denomination:,}\n"
+            f"• <b>Cost:</b> {price_tag}\n"
+            f"• <b>Mode:</b> <code>{mode_text}</code>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"Click <b>Confirm & Buy</b> to trigger the Playwright automation engine."
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_confirmation_keyboard(platform, denomination),
+    )
+    return BotState.AWAITING_CONFIRMATION
+
+async def confirm_buy_execution(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Runs the Playwright headless browser automation with live status updates."""
+    query = update.callback_query
+    await query.answer()
+
+    parts = query.data.split(":")
+    platform = parts[1]
+    denomination = int(parts[2])
+
+    user_id = update.effective_user.id
+    service = PLATFORM_SERVICES.get(platform)
+    if not service:
+        await query.edit_message_text(f"❌ Unsupported platform: {platform}")
+        return ConversationHandler.END
+
+    plat_name = config.PLATFORMS.get(platform, {}).get("name", platform.title())
+
+    # Pre-flight check: ensure active session exists
+    if not browser_manager.has_session(user_id, platform):
+        await query.edit_message_text(
+            text=(
+                "⚠️ <b>Rooter Account Logged In Nahi Hai!</b>\n\n"
+                "Cloud server restart hone ki wajah se session reset ho gaya hai ya Bearer token missing hai.\n\n"
+                "👉 Kripya pehle <code>/login</code> dabayein aur <b>Paste Bearer Token</b> select karke apna token paste karein.\n\n"
+                "💡 <i>Tip: Railway Variables me <code>ROOTER_AUTH_TOKEN</code> set karne se token kabhi reset nahi hoga!</i>"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_main_menu_keyboard(),
+        )
+        return ConversationHandler.END
+
+    # Initial live status message
+    status_msg = await query.edit_message_text(
+        text=f"🔍 <b>Connecting to Playwright Engine for {plat_name}...</b>",
+        parse_mode=ParseMode.HTML,
+    )
+
+    # Helper callback to send live updates directly to user
+    async def progress_notifier(step_text: str, emoji: str = "⚡"):
+        try:
+            await status_msg.edit_text(
+                text=f"{emoji} <b>{html.escape(step_text)}</b>\n\n<i>Automating via Headless Chromium...</i>",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+
+    browser_context = None
+    page = None
+    try:
+        # Launch browser context with stored user session if available
+        browser_context = await browser_manager.create_context(
+            user_id=user_id,
+            platform=platform,
+            apply_storage_state=True,
+        )
+        page = await browser_context.new_page()
+
+        # Run purchase flow
+        result = await service.execute_buy_flow(
+            page=page,
+            denomination=denomination,
+            progress_callback=progress_notifier,
+            simulation=config.SIMULATION_MODE,
+        )
+
+        prod_name = "Google Play Recharge Code" if denomination < 1000 else "PlayStation Gift Card"
+        redeem_tip = "Redeem this code in Google Play Store." if denomination < 1000 else "Redeem this on your PlayStation Store console or app."
+
+        if result.success:
+            sim_badge = " [SIMULATED TEST]" if result.simulation else ""
+            v_code = html.escape(result.voucher_code or "")
+            v_pin = html.escape(result.voucher_pin or "")
+            o_id = html.escape(result.order_id or "")
+
+            success_text = (
+                f"🎉 <b>PURCHASE SUCCESSFUL!{sim_badge}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🎯 <b>Platform:</b> {plat_name}\n"
+                f"📦 <b>Item:</b> {prod_name}\n"
+                f"💰 <b>Denomination:</b> ₹{result.denomination:,}\n"
+                f"🔑 <b>Voucher / Redeem Code:</b>\n<code>{v_code}</code>\n"
+                f"🔒 <b>PIN / Key:</b>\n<code>{v_pin}</code>\n"
+                f"🧾 <b>Order ID:</b> <code>{o_id}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"✨ {redeem_tip}"
+            )
+            await status_msg.edit_text(
+                text=success_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=get_main_menu_keyboard(),
+            )
+            # Send confirmation screenshot if available
+            shot_file = result.error_screenshot
+            if shot_file and os.path.exists(shot_file):
+                try:
+                    with open(shot_file, "rb") as photo:
+                        await context.bot.send_photo(
+                            chat_id=update.effective_chat.id,
+                            photo=photo,
+                            caption=f"📸 Order proof for {prod_name} on {plat_name}",
+                        )
+                except Exception as ex:
+                    logger.debug(f"Could not dispatch screenshot: {ex}")
+        else:
+            # Capture error screenshot for inspection
+            screenshot_path = result.error_screenshot or await browser_manager.capture_screenshot(page, name_prefix=f"err_{platform}")
+
+            fail_text = (
+                f"⚠️ <b>Notice: Purchase Flow Stopped</b>\n\n"
+                f"• <b>Platform:</b> {plat_name}\n"
+                f"• <b>Item:</b> {prod_name}\n"
+                f"• <b>Reason:</b> {html.escape(result.message)}\n\n"
+            )
+
+            # Check if Out of stock -> offer alternate platform
+            if "out of stock" in result.message.lower() or "out-of-stock" in result.message.lower():
+                fail_text += "💡 <b>Tip:</b> Check availability on the alternative platform below:"
+                await status_msg.edit_text(
+                    text=fail_text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=get_alternate_platform_keyboard(platform, denomination),
+                )
+            else:
+                await status_msg.edit_text(
+                    text=fail_text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=get_main_menu_keyboard(),
+                )
+
+            # Send error screenshot if captured
+            if screenshot_path:
+                try:
+                    with open(screenshot_path, "rb") as photo:
+                        await context.bot.send_photo(
+                            chat_id=update.effective_chat.id,
+                            photo=photo,
+                            caption=f"📸 Screenshot captured on {plat_name}",
+                        )
+                except Exception as ex:
+                    logger.warning(f"Could not dispatch screenshot: {ex}")
+
+    except Exception as e:
+        logger.error(f"Execution error in buy workflow: {e}", exc_info=True)
+        await status_msg.edit_text(
+            text=f"❌ <b>Automation Error:</b>\n<code>{html.escape(str(e))}</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_main_menu_keyboard(),
+        )
+    finally:
+        if page:
+            await page.close()
+        if browser_context:
+            await browser_context.close()
+
+    return ConversationHandler.END
+
+# ==================== AUTO-SNIPER (24/7 RESTOCK MONITOR) ====================
+
+async def run_sniper_loop(
+    chat_id: int,
+    user_id: int,
+    platform: str,
+    denomination: int,
+    bot,
+    stop_event: asyncio.Event,
+):
+    """
+    Background worker loop that refreshes Rooter Shop every 30 seconds.
+    As soon as stock is detected, it immediately executes purchase and delivers
+    the PlayStation voucher code and PIN to the user on Telegram.
+    """
+    plat_name = config.PLATFORMS.get(platform, {}).get("name", platform.title())
+    service = PLATFORM_SERVICES.get(platform)
+    browser_context = None
+    page = None
+    attempts = 0
+
+    logger.info(f"Starting sniper loop for user {user_id} on {platform} ₹{denomination}")
+
+    try:
+        browser_context = await browser_manager.create_context(
+            user_id=user_id,
+            platform=platform,
+            apply_storage_state=True,
+        )
+        page = await browser_context.new_page()
+        is_any_mode = (denomination == 0)
+        target_denomination = denomination
+        prod_name = "PlayStation Gift Card"
+        redeem_tip = "Redeem this immediately on your PlayStation console or app."
+        if is_any_mode:
+            start_desc = "Any PlayStation Gift Card (₹1,000 to ₹5,000)"
+        else:
+            start_desc = f"{prod_name} ₹{denomination:,}"
+
+        # Send immediate live confirmation to Telegram chat
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"🔍 <b>Sniper Active:</b> Opening Rooter Shop to inspect <b>{start_desc}</b>...\n"
+                    f"⚡ <i>Available hote hi 1 second me instant auto-buy karega!</i>"
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as me:
+            logger.warning(f"Could not send sniper start message: {me}")
+
+        while not stop_event.is_set():
+            attempts += 1
+            if user_id in ACTIVE_SNIPERS:
+                ACTIVE_SNIPERS[user_id]["attempts"] = attempts
+
+            target_desc = "Any PlayStation (₹1k-₹5k)" if is_any_mode else f"₹{denomination}"
+            logger.info(f"[Sniper #{attempts}] Checking stock on {platform} for {target_desc}...")
+
+            # Ensure page is alive
+            if page.is_closed():
+                page = await browser_context.new_page()
+
+            is_in_stock = False
+            available_denominations = []
+            try:
+                if is_any_mode:
+                    available_denominations = await service.get_in_stock_playstation_denominations(page)
+                    is_in_stock = len(available_denominations) > 0
+                else:
+                    is_in_stock = await service.check_is_in_stock(page, denomination)
+                    if is_in_stock:
+                        available_denominations = [denomination]
+            except Exception as e:
+                logger.warning(f"[Sniper #{attempts}] Error during stock check: {e}")
+                if attempts == 1:
+                    try:
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=f"⚠️ Rooter page notice: <code>{html.escape(str(e)[:100])}</code>. Continuing check...",
+                            parse_mode=ParseMode.HTML,
+                        )
+                    except Exception:
+                        pass
+
+            if attempts == 1 and not is_in_stock:
+                status_desc = "PlayStation Gift Cards (₹1,000, ₹2,000, ₹3,000, ₹5,000)" if is_any_mode else f"{prod_name} ₹{denomination:,}"
+                try:
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=(
+                            f"ℹ️ <b>Stock Status:</b> {status_desc} abhi Rooter par <b>Out of Stock</b> hai.\n"
+                            f"🔄 <i>Monitoring actively every {config.SNIPE_INTERVAL_SECONDS}s. Jaise hi restock hoga, turant buy kar lega!</i>"
+                        ),
+                        parse_mode=ParseMode.HTML,
+                    )
+                except Exception:
+                    pass
+
+            if is_in_stock:
+                logger.info(f"🚨 [Sniper #{attempts}] STOCK DETECTED on {platform}: {available_denominations}!")
+
+                # Live sync balances right when stock arrives to ensure accurate balance
+                try:
+                    await account_manager.sync_all_balances()
+                except Exception as s_err:
+                    logger.warning(f"[Sniper] Live balance sync warning: {s_err}")
+
+                # Retrieve all active accounts for multi-account buying
+                active_accounts = account_manager.get_active()
+                if not active_accounts:
+                    active_accounts = [{
+                        "id": "acc_1",
+                        "label": "Account 1 (Primary)",
+                        "token": config.ROOTER_AUTH_TOKEN,
+                        "wallet_balance": 0.0,
+                    }]
+
+                # Target denomination is strictly ₹4,000 PlayStation Card
+                target_d = config.TARGET_DENOMINATION
+                order_tasks = []
+                for acc in active_accounts:
+                    bal = float(acc.get("wallet_balance", 0.0))
+                    acc_label = acc.get("label", acc.get("id"))
+                    target_q = 1
+
+                    if bal > 0:
+                        if bal >= target_d:
+                            affordable_q = int(bal // target_d)
+                            target_q = min(affordable_q, config.MAX_CARDS_PER_ACCOUNT)
+                            order_tasks.append((acc, target_d, target_q))
+                        else:
+                            logger.info(f"[Sniper] Account {acc_label} skipped: Balance ₹{bal:,.0f} < ₹{target_d:,}")
+                            await broadcast_to_admins(
+                                bot,
+                                text=f"⚠️ <b>{html.escape(acc_label)} Skipped:</b> Balance ₹{bal:,.0f} is insufficient for ₹{target_d:,} PlayStation Card.",
+                            )
+                    else:
+                        # Balance untracked: attempt buying 1 card
+                        target_q = 1
+                        order_tasks.append((acc, target_d, target_q))
+
+                if not order_tasks:
+                    logger.warning("[Sniper] Stock detected but no active accounts have sufficient balance.")
+                    continue
+
+                # Broadcast immediate alert to all configured admin chat IDs
+                acc_summary = ", ".join([f"{a.get('label', a['id'])} (₹{d:,} x{q})" for a, d, q in order_tasks])
+                await broadcast_to_admins(
+                    bot,
+                    text=(
+                        f"🚨 <b>4K STOCK DETECTED!</b>\n\n"
+                        f"🎯 <b>Platform:</b> {plat_name}\n"
+                        f"📦 <b>Voucher:</b> PlayStation Gift Card ₹{target_d:,}\n"
+                        f"👥 <b>Executing Parallel 1-Click Buy for {len(order_tasks)} Account(s):</b>\n"
+                        f"<i>{html.escape(acc_summary)}</i>\n\n"
+                        f"⚡ <b>All accounts firing simultaneously with Rooter Wallet...</b>"
+                    ),
+                )
+
+                # Execute parallel buy across all accounts simultaneously using asyncio.gather
+                async def execute_account_order(acc_data, d_val, q_val):
+                    acc_tok = acc_data.get("token") or config.ROOTER_AUTH_TOKEN
+                    acc_lbl = acc_data.get("label", acc_data.get("id"))
+                    acc_ctx = await browser_manager.create_context(custom_token=acc_tok)
+                    acc_page = await acc_ctx.new_page()
+                    try:
+                        res = await service.execute_buy_flow(
+                            page=acc_page,
+                            denomination=d_val,
+                            quantity=q_val,
+                            account_label=acc_lbl,
+                            simulation=config.SIMULATION_MODE,
+                        )
+                        return (acc_data, d_val, q_val, res)
+                    finally:
+                        try:
+                            await acc_page.close()
+                            await acc_ctx.close()
+                        except Exception:
+                            pass
+
+                results = await asyncio.gather(
+                    *[execute_account_order(a, d, q) for a, d, q in order_tasks],
+                    return_exceptions=True
+                )
+
+                any_success = False
+                for item in results:
+                    if isinstance(item, Exception):
+                        logger.error(f"[Sniper] Account order exception: {item}")
+                        continue
+
+                    acc_data, d_val, q_val, result = item
+                    acc_lbl = html.escape(acc_data.get("label", acc_data.get("id")))
+
+                    if result.success:
+                        any_success = True
+                        sim_badge = " [SIMULATED TEST]" if result.simulation else ""
+                        total_paid = d_val * q_val
+                        account_manager.deduct_balance(acc_data.get("id"), total_paid)
+                        rem_bal = acc_data.get("wallet_balance", 0.0)
+
+                        codes_display = ""
+                        if result.codes and len(result.codes) > 1:
+                            codes_display = "\n".join([f"   {i+1}. <code>{html.escape(c)}</code>" for i, c in enumerate(result.codes)])
+                        else:
+                            codes_display = f"<code>{html.escape(result.voucher_code or 'N/A')}</code>"
+
+                        v_pin = html.escape(result.voucher_pin or "N/A")
+                        o_id = html.escape(result.order_id or "N/A")
+
+                        success_text = (
+                            f"🎉 <b>PURCHASE SUCCESSFUL!{sim_badge}</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"👤 <b>Account:</b> {acc_lbl}\n"
+                            f"🎯 <b>Platform:</b> {plat_name}\n"
+                            f"📦 <b>Item:</b> PlayStation Gift Card (Qty: {result.quantity})\n"
+                            f"💰 <b>Denomination:</b> ₹{result.denomination:,} each (Total Paid: ₹{total_paid:,})\n"
+                            f"🔑 <b>Voucher Code(s):</b>\n{codes_display}\n"
+                            f"🔒 <b>PIN / Key:</b> <code>{v_pin}</code>\n"
+                            f"🧾 <b>Order ID:</b> <code>{o_id}</code>\n"
+                            f"💳 <b>Remaining Balance:</b> ₹{rem_bal:,.0f}\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"✨ <i>Auto-Sniper successfully claimed your vouchers!</i>\n"
+                            f"{redeem_tip}"
+                        )
+                        shot_file = result.error_screenshot
+                        await broadcast_to_admins(
+                            bot,
+                            text=success_text,
+                            reply_markup=get_main_menu_keyboard(),
+                            photo_path=shot_file,
+                        )
+                    else:
+                        logger.warning(f"[Sniper] Purchase failed for {acc_lbl}: {result.message}")
+                        await broadcast_to_admins(
+                            bot,
+                            text=(
+                                f"⚠️ <b>Sniper Alert ({acc_lbl}):</b> Stock appeared on {plat_name}, but checkout could not finish:\n"
+                                f"<code>{html.escape(result.message)}</code>"
+                            ),
+                            reply_markup=get_stop_snipe_keyboard(),
+                        )
+
+                if any_success:
+                    logger.info("[Sniper] Purchase completed successfully for account(s). Finishing sniper run.")
+                    break
+                else:
+                    logger.warning(f"[Sniper #{attempts}] Purchase could not complete: {result.message}")
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=(
+                            f"⚠️ <b>Sniper Alert:</b> Stock appeared on {plat_name}, but checkout could not finish:\n"
+                            f"<code>{html.escape(result.message)}</code>\n\n"
+                            f"<i>Monitoring will continue in the next cycle...</i>"
+                        ),
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=get_stop_snipe_keyboard(),
+                    )
+
+            # Heartbeat message (Disabled by default to avoid chat spam and save credit)
+            if config.ENABLE_SNIPER_HEARTBEAT and attempts % 20 == 0:
+                try:
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=(
+                            f"🔄 <b>Auto-Sniper Running (24/7 Restock Monitor)</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"• <b>Platform:</b> {plat_name}\n"
+                            f"• <b>Target:</b> PlayStation ₹{denomination:,}\n"
+                            f"• <b>Refreshes Completed:</b> <code>{attempts}</code>\n"
+                            f"• <b>Status:</b> Actively checking every {config.SNIPE_INTERVAL_SECONDS}s. Ready to buy instantly when stock arrives!\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━"
+                        ),
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=get_stop_snipe_keyboard(),
+                    )
+                except Exception:
+                    pass
+
+            # Periodic memory cleanup: Refresh page every 50 checks to release Chromium memory
+            if attempts % 50 == 0:
+                try:
+                    if not page.is_closed():
+                        await page.close()
+                    page = await browser_context.new_page()
+                except Exception as e:
+                    logger.debug(f"Page memory cleanup: {e}")
+
+            # Wait before next check (interrupted immediately if stop_event is set)
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=float(config.SNIPE_INTERVAL_SECONDS))
+                # If wait_for returns without TimeoutError, stop_event was signaled
+                break
+            except asyncio.TimeoutError:
+                pass
+
+    except asyncio.CancelledError:
+        logger.info(f"Sniper task for user {user_id} was cancelled.")
+    except Exception as e:
+        logger.error(f"Error in sniper loop for user {user_id}: {e}", exc_info=True)
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ <b>Auto-Sniper Error:</b> <code>{html.escape(str(e))}</code>\nMonitoring stopped.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=get_main_menu_keyboard(),
+            )
+        except Exception:
+            pass
+    finally:
+        if page:
+            try:
+                await page.close()
+            except Exception:
+                pass
+        if browser_context:
+            try:
+                await browser_context.close()
+            except Exception:
+                pass
+        ACTIVE_SNIPERS.pop(user_id, None)
+        logger.info(f"Sniper loop closed for user {user_id}")
+
+async def launch_sniper(update: Update, context: ContextTypes.DEFAULT_TYPE, platform: str = "rooter", denomination: int = 4000):
+    """Common launcher for 4K PlayStation auto-sniper background monitoring."""
+    user_id = update.effective_user.id if update.effective_user else 0
+    chat_id = update.effective_chat.id if update.effective_chat else 0
+    plat_name = config.PLATFORMS.get(platform, {}).get("name", "Rooter Shop")
+
+    if not is_authorized(user_id):
+        unauth_msg = f"⛔ <b>Access Denied:</b> Your ID <code>{user_id}</code> is not in <code>ADMIN_CHAT_IDS</code>."
+        if update.callback_query:
+            await update.callback_query.answer("Access Denied", show_alert=True)
+        elif update.effective_message:
+            await update.effective_message.reply_text(unauth_msg, parse_mode=ParseMode.HTML)
+        return ConversationHandler.END
+
+    # Always enforce ₹4,000 PlayStation Card
+    denomination = config.TARGET_DENOMINATION
+
+    # Cancel any previous running snipers across all sessions
+    for uid, old_sniper in list(ACTIVE_SNIPERS.items()):
+        if old_sniper.get("stop_event"):
+            old_sniper["stop_event"].set()
+        if old_sniper.get("task") and not old_sniper["task"].done():
+            old_sniper["task"].cancel()
+        ACTIVE_SNIPERS.pop(uid, None)
+
+    stop_event = asyncio.Event()
+
+    task = asyncio.create_task(
+        run_sniper_loop(
+            chat_id=chat_id,
+            user_id=user_id,
+            platform=platform,
+            denomination=denomination,
+            bot=context.bot,
+            stop_event=stop_event,
+        )
+    )
+
+    ACTIVE_SNIPERS[user_id] = {
+        "task": task,
+        "stop_event": stop_event,
+        "platform": platform,
+        "denomination": denomination,
+        "chat_id": chat_id,
+        "attempts": 0,
+    }
+
+    mode_text = "🧪 Simulation (Dry Run)" if config.SIMULATION_MODE else "⚡ Live Purchasing (Real Checkout)"
+    prod_name = f"PlayStation ₹{denomination:,} (4K)"
+
+    success_text = (
+        f"🚀 <b>4K Auto-Sniper Activated!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎯 <b>Platform:</b> {plat_name}\n"
+        f"💰 <b>Target Voucher:</b> {prod_name}\n"
+        f"👥 <b>Multi-Account Mode:</b> Active for all logged-in accounts\n"
+        f"⏱️ <b>Refresh Rate:</b> Every {config.SNIPE_INTERVAL_SECONDS} seconds\n"
+        f"⚡ <b>Mode:</b> <code>{mode_text}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"✅ <b>24/7 Restock Monitor Active:</b> Rooter par jaise hi ₹4,000 card aayega, sabhi accounts instant 1-click buy karenge aur voucher codes sabhi admin chats me turant deliver ho jayenge!\n\n"
+        f"<i>Stop karne ke liye <code>/stop</code> dabayein.</i>"
+    )
+
+    await broadcast_to_admins(context.bot, success_text, reply_markup=get_stop_snipe_keyboard())
+    return ConversationHandler.END
+
+
+async def snipe_start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Initiates the 24/7 auto-sniper restock flow for ₹4,000 PlayStation Card."""
+    user_id = update.effective_user.id if update.effective_user else 0
+    if not is_authorized(user_id):
+        unauth_msg = f"⛔ <b>Access Denied:</b> Your ID <code>{user_id}</code> is not in <code>ADMIN_CHAT_IDS</code>."
+        if update.callback_query:
+            await update.callback_query.answer("Access Denied", show_alert=True)
+        elif update.effective_message:
+            await update.effective_message.reply_text(unauth_msg, parse_mode=ParseMode.HTML)
+        return ConversationHandler.END
+
+    return await launch_sniper(update, context, "rooter", config.TARGET_DENOMINATION)
+
+
+async def snipe_platform_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fallback handler redirecting to Rooter denomination selection."""
+    return await snipe_start_handler(update, context)
+
+
+async def snipe_denomination_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Denomination picked; launches background auto-sniper loop."""
+    return await launch_sniper(update, context, "rooter", config.TARGET_DENOMINATION)
+
+
+async def stop_snipe_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Stops the active auto-sniper background process across all admins."""
+    user_id = update.effective_user.id if update.effective_user else 0
+    query = update.callback_query
+    if not is_authorized(user_id):
+        if query:
+            await query.answer("Access Denied", show_alert=True)
+        return ConversationHandler.END
+
+    stopped = False
+    for uid, sniper_data in list(ACTIVE_SNIPERS.items()):
+        stop_event = sniper_data.get("stop_event")
+        if stop_event:
+            stop_event.set()
+        task = sniper_data.get("task")
+        if task and not task.done():
+            task.cancel()
+        ACTIVE_SNIPERS.pop(uid, None)
+        stopped = True
+
+    if stopped:
+        msg = (
+            f"🛑 <b>Auto-Sniper Stopped!</b>\n\n"
+            f"• Target: PlayStation ₹{config.TARGET_DENOMINATION:,} (4K)\n"
+            f"Stock monitoring paused. You can restart anytime with /snipe or /start."
+        )
+        await broadcast_to_admins(context.bot, msg, reply_markup=get_main_menu_keyboard())
+    else:
+        msg = "ℹ️ <b>No active auto-sniper is currently running.</b>\nStart one with /snipe."
+        if query:
+            await query.answer()
+            await query.edit_message_text(text=msg, parse_mode=ParseMode.HTML, reply_markup=get_main_menu_keyboard())
+        else:
+            await update.message.reply_text(text=msg, parse_mode=ParseMode.HTML, reply_markup=get_main_menu_keyboard())
+
+    return ConversationHandler.END
+
+
+async def stop_playstore_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Redirects to stop_snipe_handler."""
+    return await stop_snipe_handler(update, context)
+            target_name = "Any PlayStation Card (₹1k-₹5k)"
+        else:
+            target_name = f"PlayStation ₹{d:,}"
+
+    run_status = ""
+    if was_playstore:
+        run_status = f"🛑 <b>Active Play Store Sniper Stopped:</b> <code>{target_name}</code> has been terminated.\n\n"
+    elif was_running:
+        run_status = f"🛑 <b>Previous Monitor Stopped:</b> <code>{target_name}</code> has been paused.\n\n"
+
+    msg = (
+        "🛑 <b>Play Store Auto-Buy STOPPED!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{run_status}"
+        "✅ <b>PlayStation Only Mode Active:</b>\n"
+        "• <b>Play Store Gift Cards:</b> ❌ Completely Stopped & Disabled\n"
+        "• <b>Target:</b> 🎮 <b>PlayStation Gift Cards ONLY (₹1,000 to ₹5,000)</b>\n"
+        "• <b>Multi-Account Sniper:</b> Stock aane par sabhi 5-10 accounts balance-aware parallel buy karenge!\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "👇 <i>PlayStation 24/7 restock monitor start karne ke liye neeche button dabayein:</i>"
+    )
+
+    if query:
+        await query.answer("Play Store buying stopped. Only PlayStation mode active.")
+        await query.edit_message_text(
+            text=msg,
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_playstore_stopped_keyboard(),
+        )
+    else:
+        await update.message.reply_text(
+            text=msg,
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_playstore_stopped_keyboard(),
+        )
+
+# ==================== LOGIN WORKFLOW ====================
+
+async def login_start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Initiates login flow for Rooter Shop."""
+    query = update.callback_query
+    context.user_data["login_platform"] = "rooter"
+    msg = "🔑 <b>Rooter Shop Authentication</b>\n\nChoose how you want to log into your Rooter account:"
+    if query:
+        await query.answer()
+        await query.edit_message_text(
+            text=msg,
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_login_methods_keyboard("rooter"),
+        )
+    else:
+        await update.message.reply_text(
+            text=msg,
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_login_methods_keyboard("rooter"),
+        )
+    return BotState.SELECT_LOGIN_METHOD
+
+async def login_platform_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fallback handler redirecting to Rooter login methods."""
+    return await login_start_handler(update, context)
+
+async def login_method_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User selects Phone+OTP or Cookie import."""
+    query = update.callback_query
+    await query.answer()
+
+    parts = query.data.split(":")
+    method = parts[2] if len(parts) > 2 else "cookie"
+    platform = "rooter"
+
+    context.user_data["login_platform"] = "rooter"
+
+    # Pre-configured phone number check
+    default_phone = ""
+    if config.ROOTER_MOBILE:
+        default_phone = f"\n💡 <i>(Pre-configured in ENV: {config.ROOTER_MOBILE})</i>"
+
+    if method == "phone":
+        await query.edit_message_text(
+            text=(
+                f"📱 <b>Interactive Phone Login — Rooter Shop</b>\n\n"
+                f"Please reply with your <b>10-digit mobile number</b> linked to Rooter:\n"
+                f"<i>(Example: 9876543210)</i>{default_phone}"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_cancel_keyboard(),
+        )
+        return BotState.AWAITING_PHONE
+
+    elif method == "cookie":
+        await query.edit_message_text(
+            text=(
+                "🍪 <b>Paste Bearer Token or Cookies — Rooter Shop</b>\n\n"
+                "Aap apna <b>Bearer Token</b> (e.g. <code>eyJhbGci...</code>) ya cookies JSON yahan chat me paste karein:\n\n"
+                "<i>Bot turant isse session me save kar lega aur wallet connect ho jayega!</i>"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_cancel_keyboard(),
+        )
+        return BotState.AWAITING_COOKIE_DATA
+
+async def handle_phone_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receives phone number and triggers headless browser OTP request."""
+    user_id = update.effective_user.id
+    phone_text = update.message.text.strip()
+    platform = "rooter"
+    service = PLATFORM_SERVICES.get("rooter")
+
+    # Store login context
+    otp_event = asyncio.Event()
+    LOGIN_SESSIONS[user_id] = {
+        "platform": platform,
+        "phone": phone_text,
+        "otp_event": otp_event,
+        "otp_value": "",
+    }
+
+    status_msg = await update.message.reply_text(
+        f"⏳ <b>Launching headless browser to request OTP on {platform.title()}...</b>",
+        parse_mode=ParseMode.HTML,
+    )
+
+    async def wait_for_otp() -> str:
+        await status_msg.edit_text(
+            f"📩 <b>OTP has been triggered to {phone_text}!</b>",
+            parse_mode=ParseMode.HTML,
+        )
+        await update.message.reply_text(
+            "🔢 <b>Please reply with the 4-6 digit OTP you just received:</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_cancel_keyboard(),
+        )
+        try:
+            await asyncio.wait_for(otp_event.wait(), timeout=120)
+            return LOGIN_SESSIONS.get(user_id, {}).get("otp_value", "")
+        except asyncio.TimeoutError:
+            return ""
+
+    async def run_login_task():
+        browser_context = None
+        page = None
+        try:
+            browser_context = await browser_manager.create_context()
+            page = await browser_context.new_page()
+
+            success = await service.perform_login(
+                page=page,
+                phone_number=phone_text,
+                otp_callback=wait_for_otp,
+            )
+
+            if success:
+                await browser_manager.save_session(browser_context, user_id, platform)
+                await update.message.reply_text(
+                    f"✅ <b>Successfully logged into {platform.title()}!</b>\n"
+                    f"Session cookies have been saved. You can now use <code>/buy</code>.",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=get_main_menu_keyboard(),
+                )
+            else:
+                await update.message.reply_text(
+                    f"❌ <b>Login failed or timed out on {platform.title()}.</b>\n\n"
+                    f"💡 <i>Tip:</i> Cloud servers par Rooter anti-bot security OTP block kar sakti hai.\n"
+                    f"Aap seedha <code>/login</code> me jakar <b>Paste Bearer Token</b> option se apna auth token paste kar sakte hain!",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=get_main_menu_keyboard(),
+                )
+        except Exception as e:
+            logger.error(f"Login error: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Error during login: {html.escape(str(e))}")
+        finally:
+            if page:
+                await page.close()
+            if browser_context:
+                await browser_context.close()
+            LOGIN_SESSIONS.pop(user_id, None)
+
+    asyncio.create_task(run_login_task())
+    return BotState.AWAITING_OTP
+
+async def handle_otp_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receives the OTP from the user and signals the background login browser."""
+    user_id = update.effective_user.id
+    otp_text = update.message.text.strip()
+
+    if user_id in LOGIN_SESSIONS:
+        LOGIN_SESSIONS[user_id]["otp_value"] = otp_text
+        LOGIN_SESSIONS[user_id]["otp_event"].set()
+        await update.message.reply_text("⏳ Verifying OTP with platform...")
+    else:
+        await update.message.reply_text("⚠️ No active login process found. Start with /login.")
+
+    return ConversationHandler.END
+
+async def handle_cookie_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receives raw Bearer token or JSON cookies and imports them."""
+    user_id = update.effective_user.id
+    cookie_text = update.message.text.strip()
+    platform = "rooter"
+
+    success = browser_manager.import_session_json(user_id, platform, cookie_text)
+    if success:
+        await update.message.reply_text(
+            f"✅ <b>Authentication token successfully saved for {platform.title()}!</b>\n"
+            f"You can now trigger automated purchases with <code>/buy</code>.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_main_menu_keyboard(),
+        )
+    else:
+        await update.message.reply_text(
+            "❌ Invalid token or JSON format. Please ensure you paste a valid Bearer token string or cookies JSON.",
+            reply_markup=get_main_menu_keyboard(),
+        )
+    return ConversationHandler.END
+
+async def cancel_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancels active conversation flow."""
+    query = update.callback_query
+    if query:
+        await query.answer("Operation cancelled.")
+        await query.edit_message_text(
+            "❌ Operation cancelled.",
+            reply_markup=get_main_menu_keyboard(),
+        )
+    else:
+        await update.message.reply_text(
+            "❌ Operation cancelled.",
+            reply_markup=get_main_menu_keyboard(),
+        )
+    return ConversationHandler.END
+
+
+# ==================== MULTI-ACCOUNT MANAGEMENT ====================
+
+def format_accounts_text() -> str:
+    """Builds an informative message listing all accounts, balances, and active states."""
+    accounts = account_manager.get_all()
+    if not accounts:
+        return (
+            "👥 <b>Rooter Accounts (0 Configured)</b>\n\n"
+            "Abhi koi account configured nahi hai.\n"
+            "Naya account add karne ke liye neeche diye button par click karein ya command use karein:\n"
+            "<code>/addaccount &lt;bearer_token&gt; [label]</code>"
+        )
+
+    active_accs = account_manager.get_active()
+    total_bal = account_manager.get_total_balance()
+
+    lines = [
+        "👥 <b>Rooter Accounts Manager (Multi-Account)</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        f"• <b>Total Accounts:</b> {len(accounts)}",
+        f"• <b>Active for Sniping:</b> 🟢 {len(active_accs)} / {len(accounts)}",
+        f"• <b>Combined Live Balance:</b> ₹{total_bal:,.2f}",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "<b>Registered Accounts:</b>",
+    ]
+
+    for idx, acc in enumerate(accounts, 1):
+        status_icon = "🟢 Active" if acc.get("is_active", True) else "⏸️ Paused"
+        lbl = html.escape(acc.get("label", acc.get("id")))
+        bal = float(acc.get("wallet_balance", 0.0))
+        uid = acc.get("user_id") or "N/A"
+        tok_preview = acc.get("token", "")[:12] + "..." if acc.get("token") else "None"
+        lines.append(
+            f"{idx}. <b>{lbl}</b> [{status_icon}]\n"
+            f"   • ID: <code>{acc.get('id')}</code> | UID: <code>{uid}</code>\n"
+            f"   • Live Wallet Balance: <b>₹{bal:,.2f}</b> [Rooter Live 🟢]\n"
+            f"   • Token: <code>{tok_preview}</code>"
+        )
+
+    lines.extend([
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "💡 <i>Tap an account button below to pause/resume it.</i>",
+        "💡 <i>Balances are automatically synced in real-time from Rooter!</i>",
+        "💡 <i>Optional override: <code>/setbalance &lt;acc_id&gt; &lt;amount&gt;</code></i>",
+    ])
+    return "\n".join(lines)
+
+
+async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Displays the multi-account dashboard and interactive buttons with live balance sync."""
+    try:
+        await account_manager.sync_all_balances()
+    except Exception as e:
+        logger.debug(f"Live balance sync notice: {e}")
+
+    text = format_accounts_text()
+    accounts = account_manager.get_all()
+    markup = get_accounts_keyboard(accounts)
+
+    query = update.callback_query
+    if query:
+        await query.answer()
+        await query.edit_message_text(text=text, parse_mode=ParseMode.HTML, reply_markup=markup)
+    else:
+        await update.message.reply_text(text=text, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+
+async def acc_add_prompt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Prompts the user to paste Bearer token for adding a new Rooter account."""
+    query = update.callback_query
+    prompt_text = (
+        "➕ <b>Add New Rooter Account (5-10 Multi-Account)</b>\n\n"
+        "Apne naye Rooter account ka <b>Bearer Token</b> yahan chat me paste karein:\n\n"
+        "💡 <b>Optional format:</b>\n"
+        "<code>&lt;bearer_token&gt; [label]</code>\n\n"
+        "<b>Example:</b>\n"
+        "<code>eyJhbGciOi... Account-2</code>\n\n"
+        "<i>(Balance set karne ki zaroorat nahi hai, bot Rooter se live balance auto-fetch kar lega!)</i>"
+    )
+    if query:
+        await query.answer()
+        await query.edit_message_text(text=prompt_text, parse_mode=ParseMode.HTML, reply_markup=get_cancel_keyboard())
+    else:
+        await update.message.reply_text(text=prompt_text, parse_mode=ParseMode.HTML, reply_markup=get_cancel_keyboard())
+    return BotState.AWAITING_ADD_ACCOUNT_DATA
+
+
+async def handle_add_account_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles user input containing new account token, label, and balance."""
+    raw_text = update.message.text.strip()
+    parts = raw_text.split()
+    if not parts:
+        await update.message.reply_text("❌ Input empty. Please provide a valid Bearer token.", reply_markup=get_main_menu_keyboard())
+        return ConversationHandler.END
+
+    token = parts[0]
+    label = None
+    balance = 0.0
+
+    if len(parts) >= 2:
+        if parts[1].replace(".", "", 1).isdigit():
+            balance = float(parts[1])
+        else:
+            label = parts[1]
+
+    if len(parts) >= 3:
+        if parts[2].replace(".", "", 1).isdigit():
+            balance = float(parts[2])
+        elif not label:
+            label = parts[2]
+
+    try:
+        acc = await account_manager.add_account_async(token=token, label=label, wallet_balance=balance)
+        success_text = (
+            f"✅ <b>Account Added Successfully!</b>\n\n"
+            f"• <b>Label:</b> {html.escape(acc.get('label'))}\n"
+            f"• <b>ID:</b> <code>{acc.get('id')}</code>\n"
+            f"• <b>User ID:</b> <code>{acc.get('user_id')}</code>\n"
+            f"• <b>Live Wallet Balance:</b> <b>₹{acc.get('wallet_balance'):,.2f}</b> (Rooter Verified 🟢)\n"
+            f"• <b>Status:</b> 🟢 Active for Auto-Snipe\n\n"
+            f"Restock aane par ye account baaki sabhi accounts ke sath parallel me buy karega!"
+        )
+        accounts = account_manager.get_all()
+        await update.message.reply_text(
+            text=success_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_accounts_keyboard(accounts),
+        )
+    except Exception as e:
+        logger.error(f"Failed to add account: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Failed to add account: {e}", reply_markup=get_main_menu_keyboard())
+
+    return ConversationHandler.END
+
+
+async def acc_toggle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toggles active status of an account via inline button."""
+    query = update.callback_query
+    await query.answer()
+
+    acc_id = query.data.split(":")[1]
+    new_state = account_manager.toggle_active(acc_id)
+    if new_state is not None:
+        state_str = "🟢 Active" if new_state else "⏸️ Paused"
+        acc = account_manager.get_account(acc_id)
+        lbl = acc.get("label", acc_id) if acc else acc_id
+        await query.answer(f"{lbl} is now {state_str}")
+
+    text = format_accounts_text()
+    accounts = account_manager.get_all()
+    await query.edit_message_text(text=text, parse_mode=ParseMode.HTML, reply_markup=get_accounts_keyboard(accounts))
+
+
+async def acc_remove_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Removes an account via inline button."""
+    query = update.callback_query
+    await query.answer()
+
+    acc_id = query.data.split(":")[1]
+    account_manager.remove_account(acc_id)
+
+    text = format_accounts_text()
+    accounts = account_manager.get_all()
+    await query.edit_message_text(text=text, parse_mode=ParseMode.HTML, reply_markup=get_accounts_keyboard(accounts))
+
+
+async def add_account_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Slash command to add an account: /addaccount <token> [label] [balance]"""
+    if not context.args or len(context.args) == 0:
+        return await acc_add_prompt_handler(update, context)
+
+    token = context.args[0]
+    label = context.args[1] if len(context.args) > 1 and not context.args[1].replace(".", "", 1).isdigit() else None
+    balance = 0.0
+
+    for arg in context.args[1:]:
+        if arg.replace(".", "", 1).isdigit():
+            balance = float(arg)
+            break
+
+    acc = await account_manager.add_account_async(token=token, label=label, wallet_balance=balance)
+    await update.message.reply_text(
+        f"✅ <b>Account Added / Updated:</b> {html.escape(acc.get('label'))} (Live Balance: ₹{acc.get('wallet_balance'):,.2f})",
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_accounts_keyboard(account_manager.get_all()),
+    )
+
+
+async def set_balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Slash command to update an account balance: /setbalance <acc_id_or_number> <amount>"""
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "ℹ️ <b>Usage:</b> <code>/setbalance &lt;acc_id&gt; &lt;amount&gt;</code>\n"
+            "<b>Example:</b> <code>/setbalance acc_1 1084</code> or <code>/setbalance 1 5000</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    raw_id = context.args[0].strip().lower()
+    acc_id = f"acc_{raw_id}" if raw_id.isdigit() else raw_id
+    try:
+        amount = float(context.args[1].replace(",", "").replace("₹", ""))
+    except ValueError:
+        await update.message.reply_text("❌ Invalid amount. Example: <code>/setbalance acc_1 1084</code>", parse_mode=ParseMode.HTML)
+        return
+
+    success = account_manager.update_balance(acc_id, amount)
+    if success:
+        acc = account_manager.get_account(acc_id)
+        lbl = acc.get("label", acc_id) if acc else acc_id
+        await update.message.reply_text(
+            f"✅ <b>Balance Updated:</b> {html.escape(lbl)} wallet balance is now <b>₹{amount:,.0f}</b>.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_accounts_keyboard(account_manager.get_all()),
+        )
+    else:
+        await update.message.reply_text(
+            f"❌ Account <code>{html.escape(acc_id)}</code> nahi mila! Check <code>/accounts</code>.",
+            parse_mode=ParseMode.HTML,
+        )
+
+
+async def settoken_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sets/updates the primary account token: /settoken <token>"""
+    user_id = update.effective_user.id if update.effective_user else 0
+    if not is_authorized(user_id):
+        await update.effective_message.reply_text("⛔ Unauthorized.")
+        return
+    if not context.args or len(context.args) == 0:
+        await update.effective_message.reply_text(
+            "ℹ️ <b>Usage:</b> <code>/settoken &lt;bearer_token&gt;</code>\n"
+            "Sets your primary account token and syncs live balance.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    token = context.args[0].strip()
+    config.ROOTER_AUTH_TOKEN = token
+    acc = await account_manager.add_account_async(token=token, label="Account 1 (Primary)")
+    await update.effective_message.reply_text(
+        f"✅ <b>Primary Token Updated!</b>\n"
+        f"• <b>Account:</b> {html.escape(acc.get('label'))}\n"
+        f"• <b>User ID:</b> <code>{acc.get('user_id')}</code>\n"
+        f"• <b>Live Wallet Balance:</b> <b>₹{acc.get('wallet_balance'):,.2f}</b>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_main_menu_keyboard(),
+    )
+
+
