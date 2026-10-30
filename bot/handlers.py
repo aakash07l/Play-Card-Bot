@@ -729,13 +729,15 @@ async def run_sniper_loop(
 
                         try:
                             shot_file = result.error_screenshot
-                            if shot_file and os.path.exists(shot_file):
-                                with open(shot_file, "rb") as photo:
-                                    await bot.send_photo(
-                                        chat_id=chat_id,
-                                        photo=photo,
-                                        caption=f"📸 Order proof for {acc_lbl}",
-                                    )
+                            if shot_file:
+                                import os as _os
+                                if _os.path.exists(shot_file):
+                                    with open(shot_file, "rb") as photo:
+                                        await bot.send_photo(
+                                            chat_id=chat_id,
+                                            photo=photo,
+                                            caption=f"📸 Order proof for {acc_lbl}",
+                                        )
                         except Exception as ex:
                             logger.debug(f"Could not dispatch screenshot: {ex}")
                     else:
@@ -754,12 +756,19 @@ async def run_sniper_loop(
                     logger.info("[Sniper] Purchase completed successfully for account(s). Finishing sniper run.")
                     break
                 else:
-                    logger.warning(f"[Sniper #{attempts}] Purchase could not complete: {result.message}")
+                    # Bug fix: 'result' may be unbound if all items in results were Exceptions
+                    last_msg = "Checkout could not be completed for any account."
+                    for item in results:
+                        if not isinstance(item, Exception):
+                            _, _, _, last_result = item
+                            last_msg = last_result.message
+                            break
+                    logger.warning(f"[Sniper #{attempts}] Purchase could not complete: {last_msg}")
                     await bot.send_message(
                         chat_id=chat_id,
                         text=(
                             f"⚠️ <b>Sniper Alert:</b> Stock appeared on {plat_name}, but checkout could not finish:\n"
-                            f"<code>{html.escape(result.message)}</code>\n\n"
+                            f"<code>{html.escape(last_msg)}</code>\n\n"
                             f"<i>Monitoring will continue in the next cycle...</i>"
                         ),
                         parse_mode=ParseMode.HTML,
