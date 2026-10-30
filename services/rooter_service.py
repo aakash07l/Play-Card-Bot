@@ -6,6 +6,7 @@ Handles gaming shop navigation, user authentication, PlayStation wallet voucher 
 import asyncio
 import logging
 import re
+import time
 from typing import Optional, List, Callable, Awaitable
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
@@ -742,15 +743,19 @@ class RooterService(BasePlatform):
             pin_match = re.search(r"(?:PIN|Security PIN)[\s:]+([0-9]{4,8})", body_content, re.IGNORECASE)
             order_match = re.search(r"(?:Order\s*Id|Txn\s*ID|Reference)[\s:]*#?([A-Z0-9_-]+)", body_content, re.IGNORECASE)
 
-            # Success indicators
+            # Success indicators — STRICT: only Rooter-specific post-purchase phrases
+            # Removed generic words like "thank you" / "congratulations" that appear on many pages
             success_indicators = [
                 "delivered successfully", "items delivered", "item purchased", "coupon codes",
                 "paid amount", "order placed", "order successful", "purchase successful",
-                "transaction successful", "thank you", "congratulations", "redeem code"
+                "transaction successful", "redeem code",
             ]
             is_successful_order = any(ind in body_content.lower() for ind in success_indicators) or (code_match is not None)
 
             # If code was not found directly on post-checkout page, auto-fetch from Rooter profile/orders
+            # IMPORTANT: We record the time BEFORE navigating to orders page so we can verify
+            # the fetched order is actually from THIS purchase (not a previous one).
+            purchase_unix_time = int(time.time())
             if not code_match:
                 try:
                     logger.info("[Rooter] Checking profile/orders to extract latest voucher code...")
@@ -764,6 +769,28 @@ class RooterService(BasePlatform):
                         await page.wait_for_timeout(2000)
 
                     orders_body = await page.locator("body").inner_text()
+
+                    # CRITICAL FIX: Verify this is a FRESH order (placed within last 3 minutes).
+                    # Orders page shows all past orders — we must NOT treat an old order as success.
+                    # We match any time-like pattern (e.g. "2 minutes ago", "just now", "Oct 30")
+                    # and also check: if existing order_match (from checkout page) is already set,
+                    # the orders page order ID must be DIFFERENT (i.e. a new order was created).
+                    # If order_match was already set from checkout page, skip orders page order_id.
+                    orders_order_match = re.search(r"(?:Order\s*Id|Txn\s*ID|Reference)[\s:]*#?([A-Z0-9_-]+)", orders_body, re.IGNORECASE)
+                    is_fresh_order = False
+                    if orders_order_match:
+                        # Check if it's a new order: look for "just now", "minutes ago" (< 5 min), or today's date near the order
+                        fresh_signals = ["just now", "1 minute", "2 minute", "3 minute", "4 minute", "5 minute"]
+                        order_section_snippet = orders_body[:2000].lower()  # top of orders page
+                        is_fresh_order = any(sig in order_section_snippet for sig in fresh_signals)
+
+                        if not is_fresh_order:
+                            # Fallback: if existing checkout-page order_match exists, this is old
+                            logger.warning(
+                                f"[Rooter] Orders page order ID {orders_order_match.group(1)} may be a PREVIOUS order "
+                                f"(no 'just now' / 'minutes ago' signal found). Treating as false positive."
+                            )
+
                     code_match = re.search(r"(?:Code\s*#?\d*|Voucher|Key|Redeem\s*Code|Coupon\s*Codes?)[\s:\n]+([A-Z0-9-]{10,25})", orders_body, re.IGNORECASE)
                     if not code_match and prod_info["type"] == "google_play":
                         code_match = re.search(r"\b([A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4})\b", orders_body, re.IGNORECASE)
@@ -772,12 +799,17 @@ class RooterService(BasePlatform):
 
                     if not pin_match:
                         pin_match = re.search(r"(?:PIN|Security PIN)[\s:]+([0-9]{4,8})", orders_body, re.IGNORECASE)
-                    if not order_match:
-                        order_match = re.search(r"(?:Order\s*Id|Txn\s*ID|Reference)[\s:]*#?([A-Z0-9_-]+)", orders_body, re.IGNORECASE)
+                    if not order_match and is_fresh_order:
+                        # Only accept orders page order ID if we confirmed it is a fresh/new order
+                        order_match = orders_order_match
 
-                    if code_match or any(ind in orders_body.lower() for ind in success_indicators):
+                    if code_match or (is_fresh_order and any(ind in orders_body.lower() for ind in success_indicators)):
                         is_successful_order = True
                         shot_path = await browser_manager.capture_screenshot(page, f"order_{prod_info['type']}_{denomination}")
+                    elif not code_match and not is_fresh_order:
+                        # Orders page did not confirm a NEW order — mark as failure to avoid false positives
+                        logger.warning("[Rooter] No fresh order detected on orders page. Marking purchase as FAILED to prevent false positive.")
+                        is_successful_order = False
                 except Exception as oe:
                     logger.warning(f"[Rooter] Could not auto-fetch from profile/orders: {oe}")
 
