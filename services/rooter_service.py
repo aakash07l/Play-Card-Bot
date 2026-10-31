@@ -554,6 +554,16 @@ class RooterService(BasePlatform):
                     if match_price:
                         btn_val = float(match_price.group(1).replace(",", ""))
                         logger.info(f"[Rooter] Bottom button payable amount detected: ₹{btn_val}")
+                        if denomination == 4000 and btn_val < 3500:
+                            logger.error(f"[Rooter] STRICT 4K GUARD: Bottom button payable shows ₹{btn_val} (< ₹3,500). Aborting to prevent 1K purchase!")
+                            return PurchaseResult(
+                                success=False,
+                                platform="rooter",
+                                denomination=denomination,
+                                quantity=quantity,
+                                account_label=account_label,
+                                message=f"Strict 4K Guard: Payable amount is ₹{btn_val:,.0f} (₹1,000 card was selected). Aborted to prevent wrong buy.",
+                            )
 
                 # Increment quantity if quantity > 1 (e.g. 2 per order)
                 if quantity > 1:
@@ -646,10 +656,22 @@ class RooterService(BasePlatform):
                 except Exception:
                     pass
 
-            # Confirm item in checkout modal
+            # Confirm item in checkout modal (Strict 4K Anti-Wrong-Buy Guard)
             m_denom_match = re.search(r"Rs\.?\s*([0-9]+)\s*Wallet Code", modal_text, re.IGNORECASE)
             if m_denom_match:
-                logger.info(f"[Rooter] Checkout modal item confirmed: Rs.{m_denom_match.group(1)} Wallet Code. Proceeding with purchase!")
+                modal_val = int(m_denom_match.group(1))
+                if denomination == 4000 and modal_val != 4000:
+                    logger.error(f"[Rooter] CRITICAL 4K GUARD: Wanted ₹4,000 but modal shows Rs.{modal_val} Wallet Code! ABORTING to prevent 1K purchase.")
+                    return PurchaseResult(
+                        success=False,
+                        platform="rooter",
+                        denomination=denomination,
+                        quantity=quantity,
+                        account_label=account_label,
+                        message=f"Strict 4K Guard: Rooter checkout modal selected ₹{modal_val} instead of ₹4,000! Aborted purchase to prevent 1K buy.",
+                        error_screenshot=shot_path,
+                    )
+                logger.info(f"[Rooter] Checkout modal item confirmed: Rs.{modal_val} Wallet Code. Proceeding with purchase!")
             else:
                 logger.info("[Rooter] Proceeding with checkout in modal...")
 
