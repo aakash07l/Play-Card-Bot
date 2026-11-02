@@ -231,41 +231,27 @@ class RooterService(BasePlatform):
 
             await self.dismiss_location_popup(page)
 
-            # Check supported denominations: 5000, 4000, 3000, 2000, 1000
-            for d in [5000, 4000, 3000, 2000, 1000]:
-                opt_locator = page.locator("div, span, p").filter(has_text=re.compile(rf"Rs\.?\s*{d}\s*Wallet Code", re.IGNORECASE))
-                if await opt_locator.count() == 0:
-                    opt_locator = page.locator("div, span, p").filter(has_text=re.compile(rf"{d}\s*Wallet Code", re.IGNORECASE))
-
-                if await opt_locator.count() > 0:
-                    chip = opt_locator.first
-                    # Deep DOM check: evaluate up the card container to verify if it is out of stock / disabled
-                    is_out = await chip.evaluate("""el => {
-                        let curr = el;
-                        for (let i = 0; i < 4; i++) {
-                            if (!curr) break;
-                            const txt = (curr.innerText || '').toLowerCase();
-                            if ((txt.match(/wallet code/gi) || []).length > 1) {
-                                break;
-                            }
-                            if (txt.includes('out of stock') || txt.includes('sold out')) {
-                                return true;
-                            }
-                            if (curr.getAttribute('disabled') !== null || curr.getAttribute('aria-disabled') === 'true') {
-                                return true;
-                            }
-                            const cls = curr.className || '';
-                            if (typeof cls === 'string' && (cls.includes('opacity-') || cls.includes('disabled') || cls.includes('cursor-not-allowed'))) {
-                                return true;
-                            }
-                            curr = curr.parentElement;
+            # Direct Native Mantine Radio Input & Label Check across all cards
+            stock_map = await page.evaluate("""() => {
+                const results = {};
+                const inputs = Array.from(document.querySelectorAll('input.mantine-Chip-input, input[type="radio"]'));
+                for (const input of inputs) {
+                    const root = input.closest('.mantine-Chip-root') || input.parentElement;
+                    const text = (root ? (root.innerText || root.textContent || '') : '').toLowerCase();
+                    for (const denom of [5000, 4000, 3000, 2000, 1000]) {
+                        if (new RegExp(denom + '\\s*wallet\\s*code', 'i').test(text)) {
+                            const isOut = input.disabled || text.includes('out of stock') || text.includes('sold out');
+                            results[denom] = !isOut;
                         }
-                        return false;
-                    }""")
+                    }
+                }
+                return results;
+            }""")
 
-                    if not is_out:
-                        logger.info(f"🚨 [Rooter] In-stock candidate card found: ₹{d}!")
-                        in_stock_list.append(d)
+            for d in [5000, 4000, 3000, 2000, 1000]:
+                if stock_map.get(str(d)) or stock_map.get(d):
+                    logger.info(f"🚨 [Rooter] In-stock candidate card found: ₹{d}!")
+                    in_stock_list.append(d)
         except Exception as e:
             logger.warning(f"Error checking in-stock denominations: {e}")
 
@@ -320,107 +306,26 @@ class RooterService(BasePlatform):
 
                 await self.dismiss_location_popup(page)
 
-                opt_locator = page.locator("div, span, p").filter(has_text=re.compile(rf"Rs\.?\s*{denomination}\s*Wallet Code", re.IGNORECASE))
-                if await opt_locator.count() == 0:
-                    opt_locator = page.locator("div, span, p").filter(has_text=re.compile(rf"{denomination}\s*Wallet Code", re.IGNORECASE))
-
-                if await opt_locator.count() > 0:
-                    chip = opt_locator.first
-                    # Deep DOM check: evaluate up the card container to verify if it is out of stock / disabled
-                    is_out = await chip.evaluate("""el => {
-                        let curr = el;
-                        for (let i = 0; i < 4; i++) {
-                            if (!curr) break;
-                            const txt = (curr.innerText || '').toLowerCase();
-                            if ((txt.match(/wallet code/gi) || []).length > 1) {
-                                break;
-                            }
-                            if (txt.includes('out of stock') || txt.includes('sold out')) {
-                                return true;
-                            }
-                            if (curr.getAttribute('disabled') !== null || curr.getAttribute('aria-disabled') === 'true') {
-                                return true;
-                            }
-                            const cls = curr.className || '';
-                            if (typeof cls === 'string' && (cls.includes('opacity-') || cls.includes('disabled') || cls.includes('cursor-not-allowed'))) {
-                                return true;
-                            }
-                            curr = curr.parentElement;
+                # Direct Native Mantine Radio Input & Label Check for Target Denomination
+                is_in_stock = await page.evaluate("""(targetDenom) => {
+                    const inputs = Array.from(document.querySelectorAll('input.mantine-Chip-input, input[type="radio"]'));
+                    for (const input of inputs) {
+                        const root = input.closest('.mantine-Chip-root') || input.parentElement;
+                        const text = (root ? (root.innerText || root.textContent || '') : '').toLowerCase();
+                        if (new RegExp(targetDenom + '\\s*wallet\\s*code', 'i').test(text)) {
+                            const isOut = input.disabled || text.includes('out of stock') || text.includes('sold out');
+                            return !isOut;
                         }
-                        return false;
-                    }""")
+                    }
+                    return false;
+                }""", denomination)
 
-                    if is_out:
-                        logger.debug(f"[Rooter] ₹{denomination} card option is labeled Out of Stock.")
-                        return False
-
-                    # Select the exact card button container for this denomination
-                    try:
-                        await page.evaluate(f"""() => {{
-                            const all = Array.from(document.querySelectorAll('*'));
-                            const leaf = all.find(el => {{
-                                const t = (el.innerText || el.textContent || '').trim();
-                                return /Rs\\.?\\s*{denomination}\\s*Wallet Code/i.test(t) && !/(?:1000|2000|3000|5000)\\s*Wallet Code/i.test(t);
-                            }});
-                            if (leaf) {{
-                                const cardBox = leaf.closest('div[class*="border"], div[class*="rounded"], div[class*="cursor"], button') || leaf.parentElement;
-                                if (cardBox) {{
-                                    cardBox.scrollIntoView({{ block: 'center' }});
-                                    cardBox.dispatchEvent(new MouseEvent('mousedown', {{ bubbles: true, cancelable: true }}));
-                                    cardBox.dispatchEvent(new MouseEvent('mouseup', {{ bubbles: true, cancelable: true }}));
-                                    cardBox.click();
-                                }}
-                            }}
-                        }}""")
-                    except Exception:
-                        pass
-
-                    try:
-                        other_denoms = [str(x) for x in (1000, 2000, 3000, 4000, 5000) if x != denomination]
-                        neg_pattern = rf"Rs\.?\s*(?:{'|'.join(other_denoms)})\s*Wallet Code"
-                        specific_box = page.locator("div, button").filter(
-                            has_text=re.compile(rf"Rs\.?\s*{denomination}\s*Wallet Code", re.IGNORECASE)
-                        ).filter(
-                            has_not_text=re.compile(neg_pattern, re.IGNORECASE)
-                        ).first
-                        if await specific_box.count() > 0:
-                            await specific_box.click(force=True, timeout=2000)
-                    except Exception:
-                        pass
-                    await page.wait_for_timeout(400)
-
-                    # Check bottom action button
-                    try:
-                        bottom_btn = await page.wait_for_selector("button:has-text('Buy Now'), button:has-text('Proceed'), button:has-text('Pay via wallet'), button:has-text('Pay'), button:has-text('Out of Stock')", timeout=4000)
-                        if bottom_btn:
-                            btn_text = await bottom_btn.inner_text()
-                            if "out of stock" in btn_text.lower():
-                                return False
-
-                            # Verify price on button matches target denomination
-                            match_price = re.search(r"(?:Pay\s*₹?|₹\s*)([0-9,]+(?:\.[0-9]+)?)", btn_text, re.IGNORECASE)
-                            if match_price:
-                                btn_val = float(match_price.group(1).replace(",", ""))
-                                if denomination == 5000 and btn_val < 4200:
-                                    logger.warning(f"[Rooter] Strict Check: ₹5,000 clicked but button shows ₹{btn_val}.")
-                                    return False
-                                if denomination == 4000 and btn_val < 3000:
-                                    logger.warning(f"[Rooter] Strict Check: ₹4,000 clicked but button shows ₹{btn_val} (1K default active). Not in stock.")
-                                    return False
-                                if denomination == 1000 and btn_val > 2500:
-                                    logger.warning(f"[Rooter] Strict Check: ₹1,000 clicked but button shows ₹{btn_val}.")
-                                    return False
-
-                            logger.info(f"🚨 [Rooter] IN STOCK: PlayStation ₹{denomination} button is active ({btn_text})!")
-                            return True
-                    except Exception:
-                        pass
-
+                if is_in_stock:
+                    logger.info(f"🚨 [Rooter] IN STOCK: PlayStation ₹{denomination:,} is active and available!")
+                    return True
+                else:
+                    logger.debug(f"[Rooter] PlayStation ₹{denomination:,} is currently Out of Stock.")
                     return False
-
-                logger.warning(f"[Rooter] Could not locate option card for ₹{denomination}")
-                return False
-
         except Exception as e:
             logger.warning(f"Error checking Rooter stock: {e}")
             return False
@@ -460,44 +365,18 @@ class RooterService(BasePlatform):
                     pass
                 await self.dismiss_location_popup(page)
 
-                opt_locator = page.locator("div, span, p").filter(has_text=re.compile(rf"Rs\.?\s*{denomination}\s*Wallet Code", re.IGNORECASE))
-                if await opt_locator.count() == 0:
-                    opt_locator = page.locator("div, span, p").filter(has_text=re.compile(rf"{denomination}\s*Wallet Code", re.IGNORECASE))
-
-                if await opt_locator.count() == 0:
-                    return PurchaseResult(
-                        success=False,
-                        platform="rooter",
-                        denomination=denomination,
-                        quantity=quantity,
-                        account_label=account_label,
-                        message=f"Rooter {prod_name} ₹{denomination:,} option card was not found on page.",
-                    )
-
-                chip = opt_locator.first
-                # Deep DOM check: evaluate up the card container to verify if it is out of stock / disabled
-                is_out = await chip.evaluate("""el => {
-                    let curr = el;
-                    for (let i = 0; i < 4; i++) {
-                        if (!curr) break;
-                        const txt = (curr.innerText || '').toLowerCase();
-                        if ((txt.match(/wallet code/gi) || []).length > 1) {
-                            break;
+                # Direct Native Mantine Radio Input & Label Check before checkout
+                is_out = await page.evaluate("""(targetDenom) => {
+                    const inputs = Array.from(document.querySelectorAll('input.mantine-Chip-input, input[type="radio"]'));
+                    for (const input of inputs) {
+                        const root = input.closest('.mantine-Chip-root') || input.parentElement;
+                        const text = (root ? (root.innerText || root.textContent || '') : '').toLowerCase();
+                        if (new RegExp(targetDenom + '\\s*wallet\\s*code', 'i').test(text)) {
+                            return input.disabled || text.includes('out of stock') || text.includes('sold out');
                         }
-                        if (txt.includes('out of stock') || txt.includes('sold out')) {
-                            return true;
-                        }
-                        if (curr.getAttribute('disabled') !== null || curr.getAttribute('aria-disabled') === 'true') {
-                            return true;
-                        }
-                        const cls = curr.className || '';
-                        if (typeof cls === 'string' && (cls.includes('opacity-') || cls.includes('disabled') || cls.includes('cursor-not-allowed'))) {
-                            return true;
-                        }
-                        curr = curr.parentElement;
                     }
-                    return false;
-                }""")
+                    return true;
+                }""", denomination)
 
                 if is_out:
                     return PurchaseResult(
@@ -511,22 +390,21 @@ class RooterService(BasePlatform):
 
                 # Select the exact card button container for this denomination
                 try:
-                    await page.evaluate(f"""() => {{
-                        const all = Array.from(document.querySelectorAll('*'));
-                        const leaf = all.find(el => {{
-                            const t = (el.innerText || el.textContent || '').trim();
-                            return /Rs\\.?\\s*{denomination}\\s*Wallet Code/i.test(t) && !/(?:1000|2000|3000|5000)\\s*Wallet Code/i.test(t);
-                        }});
-                        if (leaf) {{
-                            const cardBox = leaf.closest('div[class*="border"], div[class*="rounded"], div[class*="cursor"], button') || leaf.parentElement;
-                            if (cardBox) {{
-                                cardBox.scrollIntoView({{ block: 'center' }});
-                                cardBox.dispatchEvent(new MouseEvent('mousedown', {{ bubbles: true, cancelable: true }}));
-                                cardBox.dispatchEvent(new MouseEvent('mouseup', {{ bubbles: true, cancelable: true }}));
-                                cardBox.click();
-                            }}
-                        }}
-                    }}""")
+                    await page.evaluate("""(targetDenom) => {
+                        const inputs = Array.from(document.querySelectorAll('input.mantine-Chip-input, input[type="radio"]'));
+                        for (const input of inputs) {
+                            const root = input.closest('.mantine-Chip-root') || input.parentElement;
+                            const text = (root ? (root.innerText || root.textContent || '') : '').toLowerCase();
+                            if (new RegExp(targetDenom + '\\s*wallet\\s*code', 'i').test(text)) {
+                                const clickable = root.querySelector('label') || root;
+                                clickable.scrollIntoView({ block: 'center' });
+                                clickable.click();
+                                input.checked = true;
+                                input.dispatchEvent(new Event('change', { bubbles: true }));
+                                break;
+                            }
+                        }
+                    }""", denomination)
                 except Exception as ce:
                     logger.debug(f"Card click evaluation notice: {ce}")
 

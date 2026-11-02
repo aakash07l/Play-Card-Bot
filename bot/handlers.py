@@ -532,18 +532,22 @@ async def run_sniper_loop(
                         available_denominations = [denomination]
             except Exception as e:
                 logger.warning(f"[Sniper #{attempts}] Error during stock check: {e}")
-                if attempts == 1:
+                if attempts == 1 or attempts % 10 == 0:
                     try:
                         await bot.send_message(
                             chat_id=chat_id,
-                            text=f"⚠️ Rooter page notice: <code>{html.escape(str(e)[:100])}</code>. Continuing check...",
+                            text=(
+                                f"⚠️ <b>Rooter Stock Check Notice (Check #{attempts}):</b>\n"
+                                f"<code>{html.escape(str(e)[:120])}</code>\n"
+                                f"<i>Retrying in next cycle...</i>"
+                            ),
                             parse_mode=ParseMode.HTML,
                         )
                     except Exception:
                         pass
 
             if attempts == 1 and not is_in_stock:
-                status_desc = "PlayStation Gift Cards (₹1,000, ₹2,000, ₹3,000, ₹5,000)" if is_any_mode else f"{prod_name} ₹{denomination:,}"
+                status_desc = "PlayStation Gift Cards (₹1,000, ₹2,000, ₹3,000, ₹4,000, ₹5,000)" if is_any_mode else f"{prod_name} ₹{denomination:,}"
                 try:
                     await bot.send_message(
                         chat_id=chat_id,
