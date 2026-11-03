@@ -216,32 +216,34 @@ class RooterService(BasePlatform):
             target_url = self.playstation_url
             if target_url not in page.url:
                 await page.goto(target_url, wait_until="domcontentloaded", timeout=config.BROWSER_TIMEOUT_MS)
-                await page.wait_for_timeout(1000)
             else:
                 await page.reload(wait_until="domcontentloaded", timeout=config.BROWSER_TIMEOUT_MS)
-                await page.wait_for_timeout(800)
 
             # Auto-dismiss region popup if present
             await self.dismiss_location_popup(page)
 
+            # Wait for Mantine chip roots to mount and be visible in DOM
             try:
-                await page.wait_for_selector("div:has-text('Wallet Code'), span:has-text('Wallet Code')", timeout=8000)
+                await page.wait_for_selector(".mantine-Chip-root", state="visible", timeout=12000)
             except Exception:
                 pass
 
+            # Generous 2.5s buffer for complete Next.js client-side React hydration
+            await page.wait_for_timeout(2500)
             await self.dismiss_location_popup(page)
 
             # Direct Native Mantine Radio Input & Label Check across all cards
             stock_map = await page.evaluate("""() => {
                 const results = {};
-                const inputs = Array.from(document.querySelectorAll('input.mantine-Chip-input, input[type="radio"]'));
-                for (const input of inputs) {
-                    const root = input.closest('.mantine-Chip-root') || input.parentElement;
-                    const text = (root ? (root.innerText || root.textContent || '') : '').toLowerCase();
+                const chips = Array.from(document.querySelectorAll('.mantine-Chip-root'));
+                for (const root of chips) {
+                    const text = (root.innerText || root.textContent || '').toLowerCase();
+                    const input = root.querySelector('input');
+                    const isDisabled = (input && input.disabled) || root.getAttribute('data-disabled') === 'true' || !!root.querySelector('[data-disabled="true"]');
+                    const hasOutOfStock = text.includes('out of stock') || text.includes('sold out');
                     for (const denom of [5000, 4000, 3000, 2000, 1000]) {
                         if (new RegExp(denom + '\\s*wallet\\s*code', 'i').test(text)) {
-                            const isOut = input.disabled || text.includes('out of stock') || text.includes('sold out');
-                            results[denom] = !isOut;
+                            results[denom] = (!isDisabled && !hasOutOfStock);
                         }
                     }
                 }
@@ -299,22 +301,26 @@ class RooterService(BasePlatform):
 
             # B. PlayStation Gift Cards (₹1,000 to ₹5,000)
             else:
+                # Wait for Mantine chip roots to mount and be visible in DOM
                 try:
-                    await page.wait_for_selector("div:has-text('Wallet Code'), span:has-text('Wallet Code')", timeout=8000)
+                    await page.wait_for_selector(".mantine-Chip-root", state="visible", timeout=12000)
                 except Exception:
                     pass
 
+                # Generous 2.5s buffer for complete Next.js client-side React hydration
+                await page.wait_for_timeout(2500)
                 await self.dismiss_location_popup(page)
 
                 # Direct Native Mantine Radio Input & Label Check for Target Denomination
                 is_in_stock = await page.evaluate("""(targetDenom) => {
-                    const inputs = Array.from(document.querySelectorAll('input.mantine-Chip-input, input[type="radio"]'));
-                    for (const input of inputs) {
-                        const root = input.closest('.mantine-Chip-root') || input.parentElement;
-                        const text = (root ? (root.innerText || root.textContent || '') : '').toLowerCase();
+                    const chips = Array.from(document.querySelectorAll('.mantine-Chip-root'));
+                    for (const root of chips) {
+                        const text = (root.innerText || root.textContent || '').toLowerCase();
                         if (new RegExp(targetDenom + '\\s*wallet\\s*code', 'i').test(text)) {
-                            const isOut = input.disabled || text.includes('out of stock') || text.includes('sold out');
-                            return !isOut;
+                            const input = root.querySelector('input');
+                            const isDisabled = (input && input.disabled) || root.getAttribute('data-disabled') === 'true' || !!root.querySelector('[data-disabled="true"]');
+                            const hasOutOfStock = text.includes('out of stock') || text.includes('sold out');
+                            return (!isDisabled && !hasOutOfStock);
                         }
                     }
                     return false;
@@ -360,19 +366,22 @@ class RooterService(BasePlatform):
                 pass
             else:
                 try:
-                    await page.wait_for_selector("div:has-text('Wallet Code'), span:has-text('Wallet Code')", timeout=8000)
+                    await page.wait_for_selector(".mantine-Chip-root", state="visible", timeout=12000)
                 except Exception:
                     pass
+                await page.wait_for_timeout(1500)
                 await self.dismiss_location_popup(page)
 
                 # Direct Native Mantine Radio Input & Label Check before checkout
                 is_out = await page.evaluate("""(targetDenom) => {
-                    const inputs = Array.from(document.querySelectorAll('input.mantine-Chip-input, input[type="radio"]'));
-                    for (const input of inputs) {
-                        const root = input.closest('.mantine-Chip-root') || input.parentElement;
-                        const text = (root ? (root.innerText || root.textContent || '') : '').toLowerCase();
+                    const chips = Array.from(document.querySelectorAll('.mantine-Chip-root'));
+                    for (const root of chips) {
+                        const text = (root.innerText || root.textContent || '').toLowerCase();
                         if (new RegExp(targetDenom + '\\s*wallet\\s*code', 'i').test(text)) {
-                            return input.disabled || text.includes('out of stock') || text.includes('sold out');
+                            const input = root.querySelector('input');
+                            const isDisabled = (input && input.disabled) || root.getAttribute('data-disabled') === 'true' || !!root.querySelector('[data-disabled="true"]');
+                            const hasOutOfStock = text.includes('out of stock') || text.includes('sold out');
+                            return (isDisabled || hasOutOfStock);
                         }
                     }
                     return true;
