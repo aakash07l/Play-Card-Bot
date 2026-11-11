@@ -146,6 +146,7 @@ def build_application():
         entry_points=[
             CommandHandler("snipe", snipe_start_handler),
             CallbackQueryHandler(snipe_start_handler, pattern="^snipe_start$"),
+            CallbackQueryHandler(snipe_denomination_selected, pattern="^snipe_denom:"),
         ],
         states={
             BotState.SELECT_SNIPE_PLATFORM: [
@@ -217,6 +218,7 @@ def build_application():
     app.add_handler(CallbackQueryHandler(toggle_sim_handler, pattern="^toggle_sim$"))
     app.add_handler(CallbackQueryHandler(stop_snipe_handler, pattern="^stop_snipe_action$"))
     app.add_handler(CallbackQueryHandler(stop_playstore_handler, pattern="^stop_playstore_action$"))
+    app.add_handler(CallbackQueryHandler(snipe_denomination_selected, pattern="^snipe_denom:"))
     app.add_handler(CallbackQueryHandler(cancel_flow, pattern="^cancel_action$"))
 
     # Global error handler

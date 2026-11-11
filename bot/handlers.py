@@ -479,11 +479,23 @@ async def run_sniper_loop(
 
     logger.info(f"Starting sniper loop for user {user_id} on {platform} ₹{denomination}")
 
+    async def _safe_sync_balances():
+        try:
+            await account_manager.sync_all_balances()
+        except Exception as s_err:
+            logger.warning(f"[Sniper] Live balance sync warning: {s_err}")
+
+    # Sync balances once BEFORE starting monitoring so stock detection fires checkout with 0ms delay
+    await _safe_sync_balances()
+    init_accounts = account_manager.get_active()
+    monitor_token = (init_accounts[0].get("token") if init_accounts else None) or config.ROOTER_AUTH_TOKEN
+
     try:
         browser_context = await browser_manager.create_context(
             user_id=user_id,
             platform=platform,
             apply_storage_state=True,
+            custom_token=monitor_token,
         )
         page = await browser_context.new_page()
         is_any_mode = (denomination == 0)
@@ -501,7 +513,7 @@ async def run_sniper_loop(
                 chat_id=chat_id,
                 text=(
                     f"🔍 <b>Sniper Active:</b> Opening Rooter Shop to inspect <b>{start_desc}</b>...\n"
-                    f"⚡ <i>Available hote hi 1 second me instant auto-buy karega!</i>"
+                    f"⚡ <i>Available hote hi instant auto-buy karega!</i>"
                 ),
                 parse_mode=ParseMode.HTML,
             )
@@ -546,6 +558,10 @@ async def run_sniper_loop(
                     except Exception:
                         pass
 
+            # Refresh wallet balances asynchronously every 10 checks so checkout never waits for API calls
+            if attempts > 1 and attempts % 10 == 0 and not is_in_stock:
+                asyncio.create_task(_safe_sync_balances())
+
             if attempts == 1 and not is_in_stock:
                 status_desc = "PlayStation Gift Cards (₹1,000, ₹2,000, ₹3,000, ₹4,000, ₹5,000)" if is_any_mode else f"{prod_name} ₹{denomination:,}"
                 try:
@@ -563,13 +579,7 @@ async def run_sniper_loop(
             if is_in_stock:
                 logger.info(f"🚨 [Sniper #{attempts}] STOCK DETECTED on {platform}: {available_denominations}!")
 
-                # Live sync balances right when stock arrives to ensure accurate balance
-                try:
-                    await account_manager.sync_all_balances()
-                except Exception as s_err:
-                    logger.warning(f"[Sniper] Live balance sync warning: {s_err}")
-
-                # Retrieve all active accounts for multi-account buying
+                # Retrieve all active accounts for multi-account buying using cached synced balances
                 active_accounts = account_manager.get_active()
                 if not active_accounts:
                     active_accounts = [{
@@ -632,28 +642,53 @@ async def run_sniper_loop(
                     logger.warning("[Sniper] Stock detected but no active accounts have sufficient balance.")
                     continue
 
-                # Notify Telegram user immediately of multi-account execution
+                # Dispatch Telegram stock alert asynchronously so checkout starts with 0ms delay
                 acc_summary = ", ".join([f"{a.get('label', a['id'])} (₹{d:,} x{q})" for a, d, q in order_tasks])
-                try:
-                    await bot.send_message(
-                        chat_id=chat_id,
-                        text=(
-                            f"🚨 <b>STOCK DETECTED!</b>\n\n"
-                            f"🎯 <b>Platform:</b> {plat_name}\n"
-                            f"📦 <b>In-Stock Denominations:</b> {', '.join([f'₹{d:,}' for d in available_denominations])}\n"
-                            f"👥 <b>Executing Parallel 1-Click Buy for {len(order_tasks)} Account(s):</b>\n"
-                            f"<i>{html.escape(acc_summary)}</i>\n\n"
-                            f"⚡ <b>All accounts firing simultaneously with Rooter Wallet...</b>"
-                        ),
-                        parse_mode=ParseMode.HTML,
-                    )
-                except Exception:
-                    pass
 
-                # Execute parallel buy across all accounts simultaneously using asyncio.gather
+                async def _send_stock_alert():
+                    try:
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=(
+                                f"🚨 <b>STOCK DETECTED!</b>\n\n"
+                                f"🎯 <b>Platform:</b> {plat_name}\n"
+                                f"📦 <b>In-Stock Denominations:</b> {', '.join([f'₹{d:,}' for d in available_denominations])}\n"
+                                f"👥 <b>Executing Parallel 1-Click Buy for {len(order_tasks)} Account(s):</b>\n"
+                                f"<i>{html.escape(acc_summary)}</i>\n\n"
+                                f"⚡ <b>All accounts firing simultaneously with Rooter Wallet...</b>"
+                            ),
+                            parse_mode=ParseMode.HTML,
+                        )
+                    except Exception:
+                        pass
+
+                asyncio.create_task(_send_stock_alert())
+
+                # Execute parallel buy across all accounts simultaneously using asyncio.gather;
+                # Reuse the already-open hydrated monitor page for the matching account for instant click!
+                monitor_page_claimed = False
+
                 async def execute_account_order(acc_data, d_val, q_val):
+                    nonlocal monitor_page_claimed
                     acc_tok = acc_data.get("token") or config.ROOTER_AUTH_TOKEN
                     acc_lbl = acc_data.get("label", acc_data.get("id"))
+                    use_monitor_page = (
+                        not monitor_page_claimed
+                        and acc_tok == monitor_token
+                        and not page.is_closed()
+                    )
+                    if use_monitor_page:
+                        monitor_page_claimed = True
+                        logger.info(f"[Sniper] Reusing hydrated monitor page for {acc_lbl} (0ms reload!)")
+                        res = await service.execute_buy_flow(
+                            page=page,
+                            denomination=d_val,
+                            quantity=q_val,
+                            account_label=acc_lbl,
+                            simulation=config.SIMULATION_MODE,
+                        )
+                        return (acc_data, d_val, q_val, res)
+
                     acc_ctx = await browser_manager.create_context(custom_token=acc_tok)
                     acc_page = await acc_ctx.new_page()
                     try:

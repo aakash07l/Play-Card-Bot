@@ -98,8 +98,8 @@ PLATFORMS = {
     },
 }
 
-# Auto-Sniper Restock Refresh Interval in Seconds (Default: 29s)
-SNIPE_INTERVAL_SECONDS = int(os.getenv("SNIPE_INTERVAL_SECONDS", "29"))
+# Auto-Sniper Restock Refresh Interval in Seconds (Default: 5s for 10-20s fast drops)
+SNIPE_INTERVAL_SECONDS = int(os.getenv("SNIPE_INTERVAL_SECONDS", "5"))
 
 # Periodic Heartbeat Notifications in Chat
 ENABLE_SNIPER_HEARTBEAT = os.getenv("ENABLE_SNIPER_HEARTBEAT", "False").lower() in ("true", "1", "yes")

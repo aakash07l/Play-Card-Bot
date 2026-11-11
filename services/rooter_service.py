@@ -209,6 +209,33 @@ class RooterService(BasePlatform):
         except Exception:
             pass
 
+    async def _read_playstation_stock_map(self, page: Page, wait_ms: int = 600) -> dict:
+        """Waits for Mantine chip roots to mount and reads live stock availability for all denominations."""
+        try:
+            await page.wait_for_selector(".mantine-Chip-root", state="visible", timeout=10000)
+        except Exception:
+            pass
+        if wait_ms > 0:
+            await page.wait_for_timeout(wait_ms)
+        await self.dismiss_location_popup(page)
+
+        return await page.evaluate("""() => {
+            const results = {};
+            const chips = Array.from(document.querySelectorAll('.mantine-Chip-root'));
+            for (const root of chips) {
+                const text = (root.innerText || root.textContent || '').toLowerCase();
+                const input = root.querySelector('input');
+                const isDisabled = (input && input.disabled) || root.getAttribute('data-disabled') === 'true' || !!root.querySelector('[data-disabled="true"]');
+                const hasOutOfStock = text.includes('out of stock') || text.includes('sold out');
+                for (const denom of [5000, 4000, 3000, 2000, 1000]) {
+                    if (new RegExp(denom + '\\\\s*wallet\\\\s*code', 'i').test(text)) {
+                        results[String(denom)] = (!isDisabled && !hasOutOfStock);
+                    }
+                }
+            }
+            return results;
+        }""")
+
     async def get_in_stock_playstation_denominations(self, page: Page) -> List[int]:
         """Returns all PlayStation denominations currently in stock, sorted from highest to lowest (₹5k -> ₹1k)."""
         in_stock_list = []
@@ -219,39 +246,11 @@ class RooterService(BasePlatform):
             else:
                 await page.reload(wait_until="domcontentloaded", timeout=config.BROWSER_TIMEOUT_MS)
 
-            # Auto-dismiss region popup if present
             await self.dismiss_location_popup(page)
-
-            # Wait for Mantine chip roots to mount and be visible in DOM
-            try:
-                await page.wait_for_selector(".mantine-Chip-root", state="visible", timeout=12000)
-            except Exception:
-                pass
-
-            # Generous 2.5s buffer for complete Next.js client-side React hydration
-            await page.wait_for_timeout(2500)
-            await self.dismiss_location_popup(page)
-
-            # Direct Native Mantine Radio Input & Label Check across all cards
-            stock_map = await page.evaluate("""() => {
-                const results = {};
-                const chips = Array.from(document.querySelectorAll('.mantine-Chip-root'));
-                for (const root of chips) {
-                    const text = (root.innerText || root.textContent || '').toLowerCase();
-                    const input = root.querySelector('input');
-                    const isDisabled = (input && input.disabled) || root.getAttribute('data-disabled') === 'true' || !!root.querySelector('[data-disabled="true"]');
-                    const hasOutOfStock = text.includes('out of stock') || text.includes('sold out');
-                    for (const denom of [5000, 4000, 3000, 2000, 1000]) {
-                        if (new RegExp(denom + '\\s*wallet\\s*code', 'i').test(text)) {
-                            results[denom] = (!isDisabled && !hasOutOfStock);
-                        }
-                    }
-                }
-                return results;
-            }""")
+            stock_map = await self._read_playstation_stock_map(page, wait_ms=600)
 
             for d in [5000, 4000, 3000, 2000, 1000]:
-                if stock_map.get(str(d)) or stock_map.get(d):
+                if stock_map.get(str(d)):
                     logger.info(f"🚨 [Rooter] In-stock candidate card found: ₹{d}!")
                     in_stock_list.append(d)
         except Exception as e:
@@ -265,27 +264,24 @@ class RooterService(BasePlatform):
         return denoms[0] if denoms else None
 
     async def check_is_in_stock(self, page: Page, denomination: int) -> bool:
-        """Accurate, denomination-specific check on Rooter product pages."""
+        """Accurate, fast denomination-specific check on Rooter product pages."""
         try:
             prod_info = self.get_product_info(denomination)
             target_url = prod_info["url"]
 
             if target_url not in page.url:
                 await page.goto(target_url, wait_until="domcontentloaded", timeout=config.BROWSER_TIMEOUT_MS)
-                await page.wait_for_timeout(1000)
             else:
                 await page.reload(wait_until="domcontentloaded", timeout=config.BROWSER_TIMEOUT_MS)
-                await page.wait_for_timeout(800)
 
-            # Auto-dismiss region popup if present
             await self.dismiss_location_popup(page)
 
             # A. Google Play Recharge Code (₹10 Test Buy)
             if prod_info["type"] == "google_play":
                 try:
                     btn = await page.wait_for_selector(
-                        "button:has-text('Pay via wallet'), button:has-text('Pay'), button:has-text('Buy Now'), button:has-text('Out of Stock')",
-                        timeout=12000
+                        "button[data-testid='proceed-to-pay'], button[data-testid='add-address-btn'], button:has-text('Pay via wallet'), button:has-text('Pay'), button:has-text('Buy Now'), button:has-text('Out of Stock')",
+                        timeout=10000
                     )
                     if btn:
                         txt = await btn.inner_text()
@@ -301,30 +297,8 @@ class RooterService(BasePlatform):
 
             # B. PlayStation Gift Cards (₹1,000 to ₹5,000)
             else:
-                # Wait for Mantine chip roots to mount and be visible in DOM
-                try:
-                    await page.wait_for_selector(".mantine-Chip-root", state="visible", timeout=12000)
-                except Exception:
-                    pass
-
-                # Generous 2.5s buffer for complete Next.js client-side React hydration
-                await page.wait_for_timeout(2500)
-                await self.dismiss_location_popup(page)
-
-                # Direct Native Mantine Radio Input & Label Check for Target Denomination
-                is_in_stock = await page.evaluate("""(targetDenom) => {
-                    const chips = Array.from(document.querySelectorAll('.mantine-Chip-root'));
-                    for (const root of chips) {
-                        const text = (root.innerText || root.textContent || '').toLowerCase();
-                        if (new RegExp(targetDenom + '\\s*wallet\\s*code', 'i').test(text)) {
-                            const input = root.querySelector('input');
-                            const isDisabled = (input && input.disabled) || root.getAttribute('data-disabled') === 'true' || !!root.querySelector('[data-disabled="true"]');
-                            const hasOutOfStock = text.includes('out of stock') || text.includes('sold out');
-                            return (!isDisabled && !hasOutOfStock);
-                        }
-                    }
-                    return false;
-                }""", denomination)
+                stock_map = await self._read_playstation_stock_map(page, wait_ms=600)
+                is_in_stock = bool(stock_map.get(str(denomination)))
 
                 if is_in_stock:
                     logger.info(f"🚨 [Rooter] IN STOCK: PlayStation ₹{denomination:,} is active and available!")
@@ -345,49 +319,30 @@ class RooterService(BasePlatform):
         progress_callback: Optional[ProgressCallback] = None,
         simulation: bool = False,
     ) -> PurchaseResult:
-        """Completes automated voucher purchase on Rooter with Rooter Wallet balance."""
+        """Completes ultra-fast automated voucher purchase on Rooter with Rooter Wallet balance."""
+        shot_path = None
         try:
             prod_info = self.get_product_info(denomination)
             target_url = prod_info["url"]
             prod_name = prod_info["name"]
 
+            navigated = False
             if target_url not in page.url:
+                navigated = True
                 if progress_callback:
                     await progress_callback(f"Navigating to {prod_name} page...", "🔍")
                 await page.goto(target_url, wait_until="domcontentloaded", timeout=config.BROWSER_TIMEOUT_MS)
-                await page.wait_for_timeout(1000)
 
-            # Auto-dismiss region popup if present
             await self.dismiss_location_popup(page)
 
             # 1. Select the specific denomination
             if prod_info["type"] == "google_play":
-                # Default selection on Google Play product page is already ₹10
-                pass
+                if navigated:
+                    await page.wait_for_timeout(500)
             else:
-                try:
-                    await page.wait_for_selector(".mantine-Chip-root", state="visible", timeout=12000)
-                except Exception:
-                    pass
-                await page.wait_for_timeout(1500)
-                await self.dismiss_location_popup(page)
-
-                # Direct Native Mantine Radio Input & Label Check before checkout
-                is_out = await page.evaluate("""(targetDenom) => {
-                    const chips = Array.from(document.querySelectorAll('.mantine-Chip-root'));
-                    for (const root of chips) {
-                        const text = (root.innerText || root.textContent || '').toLowerCase();
-                        if (new RegExp(targetDenom + '\\s*wallet\\s*code', 'i').test(text)) {
-                            const input = root.querySelector('input');
-                            const isDisabled = (input && input.disabled) || root.getAttribute('data-disabled') === 'true' || !!root.querySelector('[data-disabled="true"]');
-                            const hasOutOfStock = text.includes('out of stock') || text.includes('sold out');
-                            return (isDisabled || hasOutOfStock);
-                        }
-                    }
-                    return true;
-                }""", denomination)
-
-                if is_out:
+                # If we reused an already-open monitor page, chips are already hydrated -> only 100ms wait
+                stock_map = await self._read_playstation_stock_map(page, wait_ms=500 if navigated else 100)
+                if not stock_map.get(str(denomination)):
                     return PurchaseResult(
                         success=False,
                         platform="rooter",
@@ -397,19 +352,21 @@ class RooterService(BasePlatform):
                         message=f"Rooter {prod_name} ₹{denomination:,} is currently Out of Stock!",
                     )
 
-                # Select the exact card button container for this denomination
+                # Select the exact Mantine chip for this denomination
                 try:
                     await page.evaluate("""(targetDenom) => {
-                        const inputs = Array.from(document.querySelectorAll('input.mantine-Chip-input, input[type="radio"]'));
-                        for (const input of inputs) {
-                            const root = input.closest('.mantine-Chip-root') || input.parentElement;
-                            const text = (root ? (root.innerText || root.textContent || '') : '').toLowerCase();
-                            if (new RegExp(targetDenom + '\\s*wallet\\s*code', 'i').test(text)) {
+                        const chips = Array.from(document.querySelectorAll('.mantine-Chip-root'));
+                        for (const root of chips) {
+                            const text = (root.innerText || root.textContent || '').toLowerCase();
+                            if (new RegExp(targetDenom + '\\\\s*wallet\\\\s*code', 'i').test(text)) {
                                 const clickable = root.querySelector('label') || root;
                                 clickable.scrollIntoView({ block: 'center' });
                                 clickable.click();
-                                input.checked = true;
-                                input.dispatchEvent(new Event('change', { bubbles: true }));
+                                const input = root.querySelector('input');
+                                if (input) {
+                                    input.checked = true;
+                                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                                }
                                 break;
                             }
                         }
@@ -417,29 +374,38 @@ class RooterService(BasePlatform):
                 except Exception as ce:
                     logger.debug(f"Card click evaluation notice: {ce}")
 
-                # Also perform native Playwright click on the specific card box (excluding multi-card parent containers)
+                # Native Playwright click on the exact chip label for React state sync
                 try:
-                    other_denoms = [str(x) for x in (1000, 2000, 3000, 4000, 5000) if x != denomination]
-                    neg_pattern = rf"Rs\.?\s*(?:{'|'.join(other_denoms)})\s*Wallet Code"
-                    specific_box = page.locator("div, button").filter(
+                    chip_label = page.locator(".mantine-Chip-root label").filter(
                         has_text=re.compile(rf"Rs\.?\s*{denomination}\s*Wallet Code", re.IGNORECASE)
-                    ).filter(
-                        has_not_text=re.compile(neg_pattern, re.IGNORECASE)
                     ).first
-
-                    if await specific_box.count() > 0:
-                        await specific_box.click(force=True, timeout=2000)
+                    if await chip_label.count() > 0:
+                        await chip_label.click(force=True, timeout=1500)
                 except Exception:
                     pass
-                await page.wait_for_timeout(500)
+                await page.wait_for_timeout(200)
 
-                # Verify bottom button payable amount
-                verify_btn = page.locator("button:has-text('Buy Now'), button:has-text('Proceed'), button:has-text('Pay via wallet'), button:has-text('Pay')").first
-                if await verify_btn.is_visible(timeout=3000):
-                    btn_text = await verify_btn.inner_text()
-                    match_price = re.search(r"(?:Pay\s*₹?|₹\s*)([0-9,]+(?:\.[0-9]+)?)", btn_text, re.IGNORECASE)
-                    if match_price:
-                        btn_val = float(match_price.group(1).replace(",", ""))
+                # Verify bottom button payable amount (poll briefly for React sync)
+                verify_btn = page.locator(
+                    "button[data-testid='proceed-to-pay'], "
+                    "button[data-testid='add-address-btn'], "
+                    "button:has-text('Pay via wallet'), "
+                    "button:has-text('Pay ₹'), "
+                    "button:has-text('Buy Now'), "
+                    "button:has-text('Proceed')"
+                ).first
+                if await verify_btn.is_visible(timeout=2000):
+                    btn_val = None
+                    for _ in range(5):
+                        btn_text = await verify_btn.inner_text()
+                        match_price = re.search(r"(?:Pay\s*₹?|₹\s*)([0-9,]+(?:\.[0-9]+)?)", btn_text, re.IGNORECASE)
+                        if match_price:
+                            btn_val = float(match_price.group(1).replace(",", ""))
+                            if denomination == 4000 and btn_val < 3500:
+                                await page.wait_for_timeout(150)
+                                continue
+                        break
+                    if btn_val is not None:
                         logger.info(f"[Rooter] Bottom button payable amount detected: ₹{btn_val}")
                         if denomination == 4000 and btn_val < 3500:
                             logger.error(f"[Rooter] STRICT 4K GUARD: Bottom button payable shows ₹{btn_val} (< ₹3,500). Aborting to prevent 1K purchase!")
@@ -506,34 +472,61 @@ class RooterService(BasePlatform):
             if progress_callback:
                 await progress_callback(f"Clicking Buy / Pay on {prod_name}...", "🛒")
 
-            # 1. Check if Delivery Details modal is already open
+            # 1. Check if Delivery Details / Checkout modal is already open
+            modal_root = page.locator(".mantine-Modal-content, div[role='dialog']").first
             delivery_modal = page.locator(".mantine-Modal-content, div[role='dialog'], text='Delivery Details'").first
             modal_open = False
             try:
-                modal_open = await delivery_modal.is_visible(timeout=1000)
+                modal_open = await delivery_modal.is_visible(timeout=400)
             except Exception:
                 pass
 
             # 2. If modal is NOT already open, click the main page action button
             if not modal_open:
-                buy_btn = page.locator("button[data-testid='add-address-btn'], button:has-text('Pay via wallet'), button:has-text('Buy Now'), button:has-text('Proceed')").first
-                if await buy_btn.is_visible(timeout=4000):
+                buy_btn = page.locator(
+                    "button[data-testid='proceed-to-pay'], "
+                    "button[data-testid='add-address-btn'], "
+                    "button:has-text('Pay via wallet'), "
+                    "button:has-text('Pay via Rooter'), "
+                    "button:has-text('Pay ₹'), "
+                    "button:has-text('Buy Now'), "
+                    "button:has-text('Proceed')"
+                ).first
+                if await buy_btn.is_visible(timeout=2500):
+                    buy_btn_txt = (await buy_btn.inner_text() or "").strip()
+                    if "out of stock" in buy_btn_txt.lower():
+                        return PurchaseResult(
+                            success=False,
+                            platform="rooter",
+                            denomination=denomination,
+                            quantity=quantity,
+                            account_label=account_label,
+                            message=f"Selected ₹{denomination:,} showed '{buy_btn_txt}' before checkout click.",
+                            error_screenshot=shot_path,
+                        )
                     try:
-                        await buy_btn.click(force=True, timeout=4000)
+                        await buy_btn.click(force=True, timeout=3000)
                     except Exception:
                         try:
                             await buy_btn.dispatch_event("click")
                         except Exception:
                             pass
-                    await page.wait_for_timeout(1500)
+                    # Fast poll up to 1.5s for modal or immediate insufficient/order feedback
+                    for _ in range(6):
+                        try:
+                            if await modal_root.is_visible(timeout=150):
+                                modal_open = True
+                                break
+                        except Exception:
+                            pass
+                        await page.wait_for_timeout(250)
 
-            # 3. Click the 'Pay via wallet' button INSIDE the Delivery Details modal
-            # First, inspect the Delivery Details modal text to confirm the exact item being bought!
+            # 3. Inspect Delivery Details / Checkout modal to confirm exact item (Strict 4K Guard)
             modal_text = ""
             try:
-                delivery_modal_elem = page.locator(".mantine-Modal-content, div[role='dialog']").first
-                if await delivery_modal_elem.is_visible(timeout=1000):
-                    modal_text = await delivery_modal_elem.inner_text()
+                if await modal_root.is_visible(timeout=600):
+                    modal_open = True
+                    modal_text = await modal_root.inner_text()
             except Exception:
                 pass
 
@@ -543,7 +536,6 @@ class RooterService(BasePlatform):
                 except Exception:
                     pass
 
-            # Confirm item in checkout modal (Strict 4K Anti-Wrong-Buy Guard)
             m_denom_match = re.search(r"Rs\.?\s*([0-9]+)\s*Wallet Code", modal_text, re.IGNORECASE)
             if m_denom_match:
                 modal_val = int(m_denom_match.group(1))
@@ -560,48 +552,110 @@ class RooterService(BasePlatform):
                     )
                 logger.info(f"[Rooter] Checkout modal item confirmed: Rs.{modal_val} Wallet Code. Proceeding with purchase!")
             else:
-                logger.info("[Rooter] Proceeding with checkout in modal...")
+                logger.info("[Rooter] Proceeding with checkout...")
 
-            modal_pay_btn = page.locator(".mantine-Modal-content button:has-text('Pay via wallet'), div[role='dialog'] button:has-text('Pay via wallet'), button:has-text('Pay via wallet')").last
-            if await modal_pay_btn.is_visible(timeout=5000):
+            async def _poll_post_click(max_ms: int = 4500) -> str:
+                steps = max(1, max_ms // 250)
+                for _ in range(steps):
+                    await page.wait_for_timeout(250)
+                    try:
+                        txt = (await page.locator("body").inner_text() or "").lower()
+                    except Exception:
+                        txt = ""
+                    if any(k in txt for k in ("order placed", "payment successful", "purchase successful", "order confirmed", "thank you for your order")):
+                        return "success"
+                    if re.search(r"redeem\s*code|voucher\s*code|gift\s*code", txt):
+                        return "success"
+                    if any(k in txt for k in ("insufficient", "not enough balance", "add money", "low balance", "out of stock")):
+                        return "abort"
+                    if "enter mobile" in txt or "verify otp" in txt:
+                        return "login"
+                    try:
+                        if modal_open and not await modal_root.is_visible(timeout=100):
+                            return "closed"
+                    except Exception:
+                        pass
+                return "timeout"
+
+            # Click primary Pay button scoped strictly inside the open modal (avoid clicking page background)
+            modal_pay_btn = page.locator(
+                ".mantine-Modal-content button[data-testid='proceed-to-pay'], "
+                ".mantine-Modal-content button:has-text('Pay via wallet'), "
+                ".mantine-Modal-content button:has-text('Pay via Rooter'), "
+                ".mantine-Modal-content button:has-text('Pay ₹'), "
+                ".mantine-Modal-content button:has-text('Proceed to Pay'), "
+                ".mantine-Modal-content button:has-text('Pay Now'), "
+                ".mantine-Modal-content button:has-text('Continue'), "
+                ".mantine-Modal-content button:has-text('Proceed'), "
+                "div[role='dialog'] button[data-testid='proceed-to-pay'], "
+                "div[role='dialog'] button:has-text('Pay via wallet'), "
+                "div[role='dialog'] button:has-text('Pay via Rooter'), "
+                "div[role='dialog'] button:has-text('Pay ₹'), "
+                "div[role='dialog'] button:has-text('Proceed to Pay'), "
+                "div[role='dialog'] button:has-text('Pay Now'), "
+                "div[role='dialog'] button:has-text('Continue'), "
+                "div[role='dialog'] button:has-text('Proceed')"
+            ).last
+            click_outcome = "none"
+            if await modal_pay_btn.is_visible(timeout=2000):
                 if progress_callback:
                     await progress_callback("Confirming Delivery Details & submitting order...", "📝")
-                logger.info("[Rooter] Clicking Pay via wallet inside modal...")
+                logger.info("[Rooter] Clicking Pay button inside checkout modal...")
                 try:
-                    await modal_pay_btn.click(force=True, timeout=5000)
+                    await modal_pay_btn.click(force=True, timeout=3000)
                 except Exception:
                     try:
                         await modal_pay_btn.dispatch_event("click")
                     except Exception:
                         pass
-                await page.wait_for_timeout(4000)
+                click_outcome = await _poll_post_click(3000)
 
-            # Close coupon or offer popup if shown
-            close_coupon = page.locator("button:has-text('Skip'), svg[class*='close'], button[aria-label*='Close']").first
-            if await close_coupon.is_visible(timeout=1500):
-                try:
-                    await close_coupon.click(force=True, timeout=1000)
-                    await page.wait_for_timeout(500)
-                except Exception:
-                    pass
+            if click_outcome == "none" or click_outcome == "timeout":
+                # Close coupon or offer popup if shown inside modal
+                close_coupon = page.locator(
+                    ".mantine-Modal-content button:has-text('Skip'), "
+                    "div[role='dialog'] button:has-text('Skip'), "
+                    ".mantine-Modal-content button[aria-label*='Close'], "
+                    "div[role='dialog'] button[aria-label*='Close']"
+                ).first
+                if await close_coupon.is_visible(timeout=500):
+                    try:
+                        await close_coupon.click(force=True, timeout=1000)
+                        await page.wait_for_timeout(300)
+                    except Exception:
+                        pass
 
-            # Select Rooter Wallet / Balance payment method if presented
-            wallet_opt = page.locator("div, span, label").filter(has_text=re.compile(r"(?:Rooter\s*Wallet|Wallet\s*Balance|Pay\s*via\s*Wallet|Rooter\s*Pay|Rooter\s*Credits)", re.IGNORECASE)).first
-            if await wallet_opt.is_visible(timeout=2000):
-                try:
-                    await wallet_opt.click(force=True, timeout=2000)
-                    await page.wait_for_timeout(500)
-                except Exception:
-                    pass
+                # Select Rooter Wallet / Balance payment method strictly inside modal/payment dialog
+                wallet_opt = page.locator(".mantine-Modal-content, div[role='dialog']").locator(
+                    "button, label, input[type='radio'], div[role='radio'], div[role='button']"
+                ).filter(has_text=re.compile(r"(?:Rooter\s*Wallet|Wallet\s*Balance|Pay\s*via\s*Wallet|Rooter\s*Pay|Rooter\s*Credits)", re.IGNORECASE)).first
+                if await wallet_opt.is_visible(timeout=800):
+                    try:
+                        await wallet_opt.click(force=True, timeout=1500)
+                        await page.wait_for_timeout(300)
+                    except Exception:
+                        pass
 
-            # Confirm payment / final proceed button if modal is still open
-            confirm_pay = page.locator(".mantine-Modal-content button:has-text('Pay via wallet'), button:has-text('Pay via wallet'), button:has-text('Pay Now'), button:has-text('Proceed to Pay')").last
-            if await confirm_pay.is_visible(timeout=2000):
-                try:
-                    await confirm_pay.click(force=True, timeout=3000)
-                    await page.wait_for_timeout(4000)
-                except Exception:
-                    pass
+                # Confirm payment / final proceed button if modal is still open
+                confirm_pay = page.locator(
+                    ".mantine-Modal-content button[data-testid='proceed-to-pay'], "
+                    ".mantine-Modal-content button:has-text('Pay via wallet'), "
+                    ".mantine-Modal-content button:has-text('Pay via Rooter'), "
+                    ".mantine-Modal-content button:has-text('Pay ₹'), "
+                    ".mantine-Modal-content button:has-text('Pay Now'), "
+                    ".mantine-Modal-content button:has-text('Proceed to Pay'), "
+                    "div[role='dialog'] button[data-testid='proceed-to-pay'], "
+                    "div[role='dialog'] button:has-text('Pay via wallet'), "
+                    "div[role='dialog'] button:has-text('Pay ₹'), "
+                    "div[role='dialog'] button:has-text('Pay Now'), "
+                    "div[role='dialog'] button:has-text('Proceed to Pay')"
+                ).last
+                if await confirm_pay.is_visible(timeout=1200):
+                    try:
+                        await confirm_pay.click(force=True, timeout=2500)
+                        await _poll_post_click(4500)
+                    except Exception:
+                        pass
 
             # Capture confirmation screenshot
             shot_path = await browser_manager.capture_screenshot(page, f"order_{prod_info['type']}_{denomination}")
@@ -672,7 +726,7 @@ class RooterService(BasePlatform):
                     await page.wait_for_timeout(2500)
 
                     # Click top order card to view coupon code
-                    order_card = page.locator("text='Google Play Recharge Code', text='PlayStation Gift Card', div[class*='order']").first
+                    order_card = page.locator("text='PlayStation Gift Card', text='PlayStation Gift Cards', text='Rs.4000 Wallet Code', text='Google Play Recharge Code', div[class*='order']").first
                     if await order_card.is_visible(timeout=3000):
                         await order_card.click()
                         await page.wait_for_timeout(2000)
