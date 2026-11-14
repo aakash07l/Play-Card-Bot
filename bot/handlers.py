@@ -1395,6 +1395,13 @@ def format_accounts_text() -> str:
 
 async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Displays the multi-account dashboard and interactive buttons with live balance sync."""
+    query = update.callback_query
+    if query:
+        try:
+            await query.answer("🔄 Syncing live balances from Rooter...", show_alert=False)
+        except Exception:
+            pass
+
     try:
         await account_manager.sync_all_balances()
     except Exception as e:
@@ -1404,10 +1411,15 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     accounts = account_manager.get_all()
     markup = get_accounts_keyboard(accounts)
 
-    query = update.callback_query
     if query:
-        await query.answer()
-        await query.edit_message_text(text=text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        try:
+            await query.edit_message_text(text=text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        except Exception as te:
+            logger.debug(f"Edit message notice (unchanged content): {te}")
+            try:
+                await query.answer("✅ Balances are up to date!", show_alert=False)
+            except Exception:
+                pass
     else:
         await update.message.reply_text(text=text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
@@ -1495,7 +1507,10 @@ async def acc_toggle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     text = format_accounts_text()
     accounts = account_manager.get_all()
-    await query.edit_message_text(text=text, parse_mode=ParseMode.HTML, reply_markup=get_accounts_keyboard(accounts))
+    try:
+        await query.edit_message_text(text=text, parse_mode=ParseMode.HTML, reply_markup=get_accounts_keyboard(accounts))
+    except Exception as te:
+        logger.debug(f"Toggle edit message notice: {te}")
 
 
 async def acc_remove_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1508,7 +1523,10 @@ async def acc_remove_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     text = format_accounts_text()
     accounts = account_manager.get_all()
-    await query.edit_message_text(text=text, parse_mode=ParseMode.HTML, reply_markup=get_accounts_keyboard(accounts))
+    try:
+        await query.edit_message_text(text=text, parse_mode=ParseMode.HTML, reply_markup=get_accounts_keyboard(accounts))
+    except Exception as te:
+        logger.debug(f"Remove edit message notice: {te}")
 
 
 async def add_account_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

@@ -7,6 +7,7 @@ import asyncio
 import logging
 import re
 import time
+import datetime
 from typing import Optional, List, Callable, Awaitable
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
@@ -352,23 +353,62 @@ class RooterService(BasePlatform):
                         message=f"Rooter {prod_name} ₹{denomination:,} is currently Out of Stock!",
                     )
 
-                # Select the exact Mantine chip for this denomination
+                # Select the exact Mantine chip for this denomination using React synthetic props
                 try:
                     await page.evaluate("""(targetDenom) => {
                         const chips = Array.from(document.querySelectorAll('.mantine-Chip-root'));
+                        let matchedRoot = null;
+                        let matchedInput = null;
+                        let matchedLabel = null;
+
                         for (const root of chips) {
                             const text = (root.innerText || root.textContent || '').toLowerCase();
                             if (new RegExp(targetDenom + '\\\\s*wallet\\\\s*code', 'i').test(text)) {
-                                const clickable = root.querySelector('label') || root;
-                                clickable.scrollIntoView({ block: 'center' });
-                                clickable.click();
-                                const input = root.querySelector('input');
-                                if (input) {
-                                    input.checked = true;
-                                    input.dispatchEvent(new Event('change', { bubbles: true }));
-                                }
+                                matchedRoot = root;
+                                matchedInput = root.querySelector('input');
+                                matchedLabel = root.querySelector('label');
                                 break;
                             }
+                        }
+
+                        if (matchedRoot) {
+                            matchedRoot.scrollIntoView({ block: 'center' });
+
+                            // 1. Unset disabled attributes so click and change events register
+                            if (matchedInput) {
+                                matchedInput.disabled = false;
+                                matchedInput.removeAttribute('disabled');
+                            }
+                            matchedRoot.removeAttribute('data-disabled');
+                            if (matchedLabel) {
+                                matchedLabel.removeAttribute('data-disabled');
+                                matchedLabel.style.pointerEvents = 'auto';
+                            }
+
+                            // 2. Trigger React synthetic event handlers on the hidden radio input
+                            if (matchedInput) {
+                                const key = Object.keys(matchedInput).find(k => k.startsWith('__reactProps$') || k.startsWith('__reactFiber$'));
+                                if (key && matchedInput[key]) {
+                                    const props = matchedInput[key];
+                                    if (typeof props.onClick === 'function') {
+                                        try { props.onClick({ target: matchedInput, currentTarget: matchedInput }); } catch (e) {}
+                                    }
+                                    if (typeof props.onChange === 'function') {
+                                        try { props.onChange({ target: matchedInput, currentTarget: matchedInput, nativeEvent: new Event('change') }); } catch (e) {}
+                                    }
+                                }
+                                try { matchedInput.click(); } catch (e) {}
+                                try {
+                                    matchedInput.checked = true;
+                                    matchedInput.dispatchEvent(new Event('change', { bubbles: true }));
+                                } catch (e) {}
+                            }
+
+                            // 3. Fallback click on label and root
+                            if (matchedLabel) {
+                                try { matchedLabel.click(); } catch (e) {}
+                            }
+                            try { matchedRoot.click(); } catch (e) {}
                         }
                     }""", denomination)
                 except Exception as ce:
@@ -376,14 +416,47 @@ class RooterService(BasePlatform):
 
                 # Native Playwright click on the exact chip label for React state sync
                 try:
-                    chip_label = page.locator(".mantine-Chip-root label").filter(
+                    chip_root = page.locator(".mantine-Chip-root").filter(
                         has_text=re.compile(rf"Rs\.?\s*{denomination}\s*Wallet Code", re.IGNORECASE)
                     ).first
-                    if await chip_label.count() > 0:
-                        await chip_label.click(force=True, timeout=1500)
+                    if await chip_root.count() > 0:
+                        lbl = chip_root.locator("label").first
+                        if await lbl.count() > 0:
+                            await lbl.click(force=True, timeout=1200)
                 except Exception:
                     pass
-                await page.wait_for_timeout(200)
+                await page.wait_for_timeout(250)
+
+                # Verify active chip on page matches requested denomination (Pre-Checkout 4K Guard)
+                try:
+                    selected_chip_denom = await page.evaluate("""() => {
+                        const chips = Array.from(document.querySelectorAll('.mantine-Chip-root'));
+                        for (const root of chips) {
+                            const inp = root.querySelector('input');
+                            const lbl = root.querySelector('label');
+                            const isChecked = (inp && inp.checked) || (lbl && lbl.getAttribute('data-checked') === 'true') || root.getAttribute('data-selected') === 'true';
+                            if (isChecked) {
+                                const m = (root.innerText || '').match(/Rs\.?\s*([0-9]+)\s*Wallet Code/i);
+                                if (m) return parseInt(m[1]);
+                            }
+                        }
+                        return null;
+                    }""")
+                    if selected_chip_denom is not None:
+                        logger.info(f"[Rooter] Selected chip denomination on page verified: ₹{selected_chip_denom}")
+                        if denomination == 4000 and selected_chip_denom != 4000:
+                            logger.error(f"[Rooter] STRICT 4K GUARD: Selected chip is ₹{selected_chip_denom} instead of ₹4,000! Aborting.")
+                            return PurchaseResult(
+                                success=False,
+                                platform="rooter",
+                                denomination=denomination,
+                                quantity=quantity,
+                                account_label=account_label,
+                                message=f"Strict 4K Guard: Page kept ₹{selected_chip_denom} chip selected instead of ₹4,000. Aborted purchase to prevent 1K buy.",
+                                error_screenshot=shot_path,
+                            )
+                except Exception as ve:
+                    logger.debug(f"Selected chip verification notice: {ve}")
 
                 # Verify bottom button payable amount (poll briefly for React sync)
                 verify_btn = page.locator(
@@ -733,31 +806,41 @@ class RooterService(BasePlatform):
 
                     orders_body = await page.locator("body").inner_text()
 
-                    # CRITICAL FIX: Verify this is a FRESH order (placed within last 3 minutes).
-                    # Orders page shows all past orders — we must NOT treat an old order as success.
-                    # We match any time-like pattern (e.g. "2 minutes ago", "just now", "Oct 30")
-                    # and also check: if existing order_match (from checkout page) is already set,
-                    # the orders page order ID must be DIFFERENT (i.e. a new order was created).
-                    # If order_match was already set from checkout page, skip orders page order_id.
+                    # CRITICAL FIX: Verify this is a FRESH order (placed within recent minutes).
+                    # Rooter displays timestamps like "11:29 AM, 14 Nov, 2026" and "items delivered successfully"
+                    now_dt = datetime.datetime.now()
+                    today_str_1 = now_dt.strftime("%d %b").lower()  # e.g. "14 nov"
+                    today_str_2 = now_dt.strftime("%d %B").lower()  # e.g. "14 november"
+                    today_str_3 = f"{now_dt.day} {now_dt.strftime('%b')}".lower() # e.g. "14 nov" (no leading zero)
+                    order_section_snippet = orders_body[:2500].lower()
+
+                    fresh_signals = [
+                        "just now", "second", "sec ago", "secs ago",
+                        "1 minute", "2 minute", "3 minute", "4 minute", "5 minute",
+                        "1 min", "2 min", "3 min", "4 min", "5 min",
+                        "minute ago", "minutes ago",
+                        "delivered successfully", "items delivered", "item delivered",
+                    ]
+                    is_fresh_order = any(sig in order_section_snippet for sig in fresh_signals)
+
+                    # Also verify today's date appears near the top order card
+                    if any(td in order_section_snippet for td in (today_str_1, today_str_2, today_str_3)):
+                        is_fresh_order = True
+
+                    # Check Rooter timestamp format: "11:29 AM, 14 Nov, 2026"
+                    time_match = re.search(r"(\d{1,2}:\d{2}\s*(?:AM|PM),?\s*\d{1,2}\s+[A-Za-z]+,?\s*\d{4})", orders_body[:2500], re.IGNORECASE)
+                    if time_match:
+                        try:
+                            t_clean = time_match.group(1).replace(",", "")
+                            parsed_dt = datetime.datetime.strptime(t_clean, "%I:%M %p %d %b %Y")
+                            if abs((now_dt - parsed_dt).total_seconds()) <= 1200:  # placed within last 20 minutes
+                                is_fresh_order = True
+                        except Exception:
+                            pass
+
                     orders_order_match = re.search(r"(?:Order\s*Id|Txn\s*ID|Reference)[\s:]*#?([A-Z0-9_-]+)", orders_body, re.IGNORECASE)
-                    is_fresh_order = False
-                    if orders_order_match:
-                        fresh_signals = [
-                            "just now", "second", "sec ago", "secs ago",
-                            "1 minute", "2 minute", "3 minute", "4 minute", "5 minute",
-                            "1 min", "2 min", "3 min", "4 min", "5 min",
-                            "minute ago", "minutes ago",
-                        ]
-                        order_section_snippet = orders_body[:2000].lower()  # top of orders page
-                        is_fresh_order = any(sig in order_section_snippet for sig in fresh_signals)
-
-                        if not is_fresh_order:
-                            logger.warning(
-                                f"[Rooter] Orders page order ID {orders_order_match.group(1)} is NOT fresh "
-                                f"(no 'just now' / 'minutes ago' signal found). Treating as old order to prevent false positive."
-                            )
-
                     if is_fresh_order:
+                        logger.info("[Rooter] Fresh order confirmed on orders page! Extracting voucher code...")
                         code_match = re.search(r"(?:Code\s*#?\d*|Voucher|Key|Redeem\s*Code|Coupon\s*Codes?)[\s:\n]+([A-Z0-9-]{10,25})", orders_body, re.IGNORECASE)
                         if not code_match and prod_info["type"] == "google_play":
                             code_match = re.search(r"\b([A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4})\b", orders_body, re.IGNORECASE)
