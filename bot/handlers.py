@@ -477,6 +477,9 @@ async def run_sniper_loop(
     page = None
     attempts = 0
 
+    if denomination in (4000, 4):
+        denomination = config.TARGET_DENOMINATION
+
     logger.info(f"Starting sniper loop for user {user_id} on {platform} ₹{denomination}")
 
     async def _safe_sync_balances():
@@ -918,6 +921,9 @@ async def launch_sniper(update: Update, context: ContextTypes.DEFAULT_TYPE, plat
         if old_sniper.get("task") and not old_sniper["task"].done():
             old_sniper["task"].cancel()
 
+    if denomination in (4000, 4):
+        denomination = config.TARGET_DENOMINATION
+
     stop_event = asyncio.Event()
 
     task = asyncio.create_task(
@@ -983,6 +989,8 @@ async def snipe_start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Check if arguments provided in slash command, e.g. /snipe any, /snipe 1000, /snipe 2000
     if context.args and len(context.args) > 0:
         raw_arg = context.args[0].lower().strip().replace("k", "000").replace("₹", "").replace("rs", "").replace(".", "")
+        if raw_arg in ("4000", "4"):
+            raw_arg = str(config.TARGET_DENOMINATION)
         if raw_arg in ("stop", "playstore", "googleplay", "gplay", "stop_playstore", "10"):
             return await stop_playstore_handler(update, context)
         elif raw_arg in ("any", "all", "auto", "0"):
@@ -991,6 +999,8 @@ async def snipe_start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             val = int(raw_arg)
             if val < 1000:
                 return await stop_playstore_handler(update, context)
+            if val in (4000, 4):
+                val = config.TARGET_DENOMINATION
             return await launch_sniper(update, context, "rooter", val)
     elif not query:
         # If user typed /snipe command directly without args, immediately launch 5K sniper
@@ -1049,6 +1059,8 @@ async def snipe_denomination_selected(update: Update, context: ContextTypes.DEFA
     parts = query.data.split(":")
     platform = parts[1]
     denomination = int(parts[2])
+    if denomination in (4000, 4):
+        denomination = config.TARGET_DENOMINATION
 
     return await launch_sniper(update, context, platform, denomination)
 

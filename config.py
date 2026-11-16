@@ -31,10 +31,13 @@ else:
     ADMIN_CHAT_IDS = list(DEFAULT_ADMIN_CHAT_IDS)
 
 # Target Denomination: Exclusively ₹5,000 PlayStation Card
-TARGET_DENOMINATION = int(os.getenv("TARGET_DENOMINATION", "5000"))
+raw_target = os.getenv("TARGET_DENOMINATION", "5000").strip()
+if raw_target in ("4000", "4k", "4", ""):
+    raw_target = "5000"
+TARGET_DENOMINATION = int(raw_target)
 DEFAULT_DENOMINATIONS = [TARGET_DENOMINATION]
 
-# Maximum cards to purchase per account (default: 2 cards = ₹8,000 if balance >= ₹8,000)
+# Maximum cards to purchase per account (default: 2 cards = ₹10,000 if balance >= ₹10,000)
 MAX_CARDS_PER_ACCOUNT = int(os.getenv("MAX_CARDS_PER_ACCOUNT", "2"))
 
 # Simulation / Dry Run mode (safe mode for testing without real card debit)

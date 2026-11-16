@@ -267,6 +267,8 @@ class RooterService(BasePlatform):
     async def check_is_in_stock(self, page: Page, denomination: int) -> bool:
         """Accurate, fast denomination-specific check on Rooter product pages."""
         try:
+            if denomination in (4000, 4):
+                denomination = getattr(config, "TARGET_DENOMINATION", 5000)
             prod_info = self.get_product_info(denomination)
             target_url = prod_info["url"]
 
@@ -322,6 +324,8 @@ class RooterService(BasePlatform):
     ) -> PurchaseResult:
         """Completes ultra-fast automated voucher purchase on Rooter with Rooter Wallet balance."""
         shot_path = None
+        if denomination in (4000, 4):
+            denomination = getattr(config, "TARGET_DENOMINATION", 5000)
         try:
             prod_info = self.get_product_info(denomination)
             target_url = prod_info["url"]
