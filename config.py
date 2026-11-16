@@ -1,5 +1,5 @@
 """
-Configuration settings for PlayStation 4K Gift Card Telegram Bot.
+Configuration settings for PlayStation 5K Gift Card Telegram Bot.
 Handles environment variables, platform URLs, denominations, admin authorization, and browser settings.
 """
 
@@ -14,7 +14,7 @@ ENV_PATH = BASE_DIR / ".env"
 # Load environment variables
 load_dotenv(dotenv_path=ENV_PATH)
 
-# Telegram Bot Token (Dedicated 4K PlayStation Bot)
+# Telegram Bot Token (Dedicated 5K PlayStation Bot)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 if not BOT_TOKEN:
     BOT_TOKEN = "8918128794:AAFYwsRDHm--pZwe9jm9pnBQe0PWUve4nck"
@@ -30,8 +30,8 @@ if raw_admin_ids:
 else:
     ADMIN_CHAT_IDS = list(DEFAULT_ADMIN_CHAT_IDS)
 
-# Target Denomination: Exclusively ₹4,000 PlayStation Card
-TARGET_DENOMINATION = int(os.getenv("TARGET_DENOMINATION", "4000"))
+# Target Denomination: Exclusively ₹5,000 PlayStation Card
+TARGET_DENOMINATION = int(os.getenv("TARGET_DENOMINATION", "5000"))
 DEFAULT_DENOMINATIONS = [TARGET_DENOMINATION]
 
 # Maximum cards to purchase per account (default: 2 cards = ₹8,000 if balance >= ₹8,000)
@@ -87,13 +87,13 @@ SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 # Rooter Product URLs
 ROOTER_PLAYSTATION_URL = "https://shop.rooter.gg/product/playstation-gift-cards"
 
-# Supported Platforms (PlayStation Only, ₹4,000 Exclusively)
+# Supported Platforms (PlayStation Only, ₹5,000 Exclusively)
 PLATFORMS = {
     "rooter": {
         "name": "Rooter Shop",
         "url": ROOTER_PLAYSTATION_URL,
         "search_query": "PlayStation Gift Cards",
-        "description": "PlayStation voucher marketplace (₹4,000 Exclusively)",
+        "description": "PlayStation voucher marketplace (₹5,000 Exclusively)",
         "supported_denominations": [TARGET_DENOMINATION],
     },
 }

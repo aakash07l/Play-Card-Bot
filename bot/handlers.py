@@ -70,7 +70,7 @@ async def broadcast_to_admins(bot, text: str, reply_markup=None):
             logger.debug(f"Broadcast to {cid} skipped: {e}")
 
 def format_status_text(user_id: int) -> str:
-    """Formats current bot status for Rooter PlayStation 4K sniper in HTML."""
+    """Formats current bot status for Rooter PlayStation 5K sniper in HTML."""
     all_accs = account_manager.get_all()
     active_accs = account_manager.get_active()
     total_bal = account_manager.get_total_balance()
@@ -95,9 +95,9 @@ def format_status_text(user_id: int) -> str:
         sniper_text = "⚪ Inactive"
 
     return (
-        f"🎮 <b>PlayStation 4K Auto-Buyer Bot (Rooter Shop)</b>\n"
+        f"🎮 <b>PlayStation 5K Auto-Buyer Bot (Rooter Shop)</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"• <b>Target Card:</b> 🎮 <b>PlayStation ₹{config.TARGET_DENOMINATION:,} (4K)</b>\n"
+        f"• <b>Target Card:</b> 🎮 <b>PlayStation ₹{config.TARGET_DENOMINATION:,} (5K)</b>\n"
         f"• <b>Execution Mode:</b> <code>{mode_text}</code>\n"
         f"• <b>24/7 Restock Sniper:</b> {sniper_text}\n"
         f"• <b>Active Accounts:</b> {rooter_logged}\n"
@@ -156,20 +156,20 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the /help command."""
     help_text = (
-        "📖 <b>PlayStation 4K Auto-Buyer Bot — User Guide</b>\n\n"
+        "📖 <b>PlayStation 5K Auto-Buyer Bot — User Guide</b>\n\n"
         "⚡ <b>Commands:</b>\n"
-        "• <code>/start</code> — Main 4K dashboard & menu\n"
-        "• <code>/snipe</code> (or <code>/snipe 4k</code>) — 🎯 24/7 Restock Sniper (Parallel 4K buy for all active accounts)\n"
+        "• <code>/start</code> — Main 5K dashboard & menu\n"
+        "• <code>/snipe</code> (or <code>/snipe 5k</code>) — 🎯 24/7 Restock Sniper (Parallel 5K buy for all active accounts)\n"
         "• <code>/stop</code> — 🛑 Stop active 24/7 restock sniper\n"
         "• <code>/accounts</code> — 👥 Manage 5-10 Rooter Accounts (Auto Live Balance Sync 🟢)\n"
         "• <code>/addaccount &lt;token&gt; [label]</code> — Add a Rooter account\n"
         "• <code>/status</code> — View active accounts, balances & sniper status\n"
         "• <code>/cancel</code> — Reset active operations\n\n"
-        "🎯 <b>Strict 4K Multi-Account Sniper:</b>\n"
+        "🎯 <b>Strict 5K Multi-Account Sniper:</b>\n"
         "1. Manage your 5 to 10 Rooter accounts with the 👥 <b>Manage Accounts</b> button.\n"
         "2. Balances are automatically synced in real-time from Rooter payments API.\n"
-        "3. Click <b>🎯 Auto-Snipe ₹4,000 PS</b> to start 24/7 monitoring.\n"
-        f"4. Bot checks stock every {config.SNIPE_INTERVAL_SECONDS}s. Jaise hi 4K card aayega, sabhi active accounts ek saath parallel 4K buy karenge!"
+        "3. Click <b>🎯 Auto-Snipe ₹5,000 PS</b> to start 24/7 monitoring.\n"
+        f"4. Bot checks stock every {config.SNIPE_INTERVAL_SECONDS}s. Jaise hi 5K card aayega, sabhi active accounts ek saath parallel 5K buy karenge!"
     )
     if update.callback_query:
         await update.callback_query.answer()
@@ -992,6 +992,9 @@ async def snipe_start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             if val < 1000:
                 return await stop_playstore_handler(update, context)
             return await launch_sniper(update, context, "rooter", val)
+    elif not query:
+        # If user typed /snipe command directly without args, immediately launch 5K sniper
+        return await launch_sniper(update, context, "rooter", config.TARGET_DENOMINATION)
 
     # If a sniper is already running for this user, cancel it to allow starting fresh
     if user_id in ACTIVE_SNIPERS:

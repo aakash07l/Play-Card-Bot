@@ -1,6 +1,6 @@
 """
-Telegram inline keyboards for the PlayStation 4K Gift Card Buyer Bot.
-Provides rich interactive UI buttons for 4K auto-sniper, multi-account management, and live purchases.
+Telegram inline keyboards for the PlayStation 5K Gift Card Buyer Bot.
+Provides rich interactive UI buttons for 5K auto-sniper, multi-account management, and live purchases.
 """
 
 from typing import List, Dict, Any, Optional
@@ -8,10 +8,10 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import config
 
 def get_main_menu_keyboard() -> InlineKeyboardMarkup:
-    """Builds the clean, 4K-exclusive main menu dashboard keyboard."""
+    """Builds the clean, 5K-exclusive main menu dashboard keyboard."""
     keyboard = [
         [
-            InlineKeyboardButton("🎯 Auto-Snipe ₹4,000 PS", callback_data="snipe_denom:rooter:4000"),
+            InlineKeyboardButton("🎯 Auto-Snipe ₹5,000 PS", callback_data=f"snipe_denom:rooter:{config.TARGET_DENOMINATION}"),
         ],
         [
             InlineKeyboardButton("👥 Manage Accounts (5-10 AC)", callback_data="accounts_view"),
@@ -41,7 +41,7 @@ def get_accounts_keyboard(accounts: List[Dict[str, Any]]) -> InlineKeyboardMarku
             InlineKeyboardButton("❌ Remove", callback_data=f"acc_remove:{acc['id']}"),
         ])
     rows.append([
-        InlineKeyboardButton("🎯 Start 4K Sniper", callback_data="snipe_denom:rooter:4000"),
+        InlineKeyboardButton("🎯 Start 5K Sniper", callback_data=f"snipe_denom:rooter:{config.TARGET_DENOMINATION}"),
         InlineKeyboardButton("🔙 Back to Main Menu", callback_data="nav_main_menu"),
     ])
     return InlineKeyboardMarkup(rows)
@@ -56,7 +56,7 @@ def get_stop_snipe_keyboard() -> InlineKeyboardMarkup:
 def get_playstore_stopped_keyboard() -> InlineKeyboardMarkup:
     """Keyboard displayed after stopping auto-sniper."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎯 Restart 4K PlayStation Sniper", callback_data=f"snipe_denom:rooter:{config.TARGET_DENOMINATION}")],
+        [InlineKeyboardButton("🎯 Restart 5K PlayStation Sniper", callback_data=f"snipe_denom:rooter:{config.TARGET_DENOMINATION}")],
         [InlineKeyboardButton("🔙 Back to Main Menu", callback_data="nav_main_menu")],
     ])
 
@@ -64,7 +64,7 @@ def get_platforms_keyboard(prefix: str = "plat_select") -> InlineKeyboardMarkup:
     """Keyboard for platform selection (Rooter Shop)."""
     keyboard = [
         [
-            InlineKeyboardButton("🎯 Rooter Shop (PlayStation ₹4,000)", callback_data=f"{prefix}:rooter"),
+            InlineKeyboardButton("🎯 Rooter Shop (PlayStation ₹5,000)", callback_data=f"{prefix}:rooter"),
         ],
         [
             InlineKeyboardButton("🔙 Back to Main Menu", callback_data="nav_main_menu"),
@@ -88,7 +88,7 @@ def get_login_methods_keyboard(platform: str = "rooter") -> InlineKeyboardMarkup
     return InlineKeyboardMarkup(keyboard)
 
 def get_denominations_keyboard(platform: str = "rooter", denominations: List[int] = None) -> InlineKeyboardMarkup:
-    """Keyboard to pick PlayStation voucher denomination (₹4,000 Exclusively)."""
+    """Keyboard to pick PlayStation voucher denomination (₹5,000 Exclusively)."""
     rows = [
         [
             InlineKeyboardButton(f"🎮 ₹{config.TARGET_DENOMINATION:,} PSN Card", callback_data=f"denom_pick:rooter:{config.TARGET_DENOMINATION}"),
@@ -101,10 +101,10 @@ def get_denominations_keyboard(platform: str = "rooter", denominations: List[int
     return InlineKeyboardMarkup(rows)
 
 def get_snipe_denominations_keyboard(platform: str = "rooter", denominations: List[int] = None) -> InlineKeyboardMarkup:
-    """Keyboard to pick voucher denomination for Auto-Sniper (Strict 4K Only)."""
+    """Keyboard to pick voucher denomination for Auto-Sniper (Strict 5K Only)."""
     rows = [
         [
-            InlineKeyboardButton("🎯 Auto-Snipe ₹4,000 Card (Strict 4K)", callback_data="snipe_denom:rooter:4000"),
+            InlineKeyboardButton("🎯 Auto-Snipe ₹5,000 Card (Strict 5K)", callback_data=f"snipe_denom:rooter:{config.TARGET_DENOMINATION}"),
         ],
         [
             InlineKeyboardButton("🔙 Main Menu", callback_data="nav_main_menu"),
@@ -113,7 +113,7 @@ def get_snipe_denominations_keyboard(platform: str = "rooter", denominations: Li
     ]
     return InlineKeyboardMarkup(rows)
 
-def get_confirmation_keyboard(platform: str = "rooter", denomination: int = 4000) -> InlineKeyboardMarkup:
+def get_confirmation_keyboard(platform: str = "rooter", denomination: int = 5000) -> InlineKeyboardMarkup:
     """Keyboard to confirm purchase before triggering Playwright headless checkout."""
     label = f"🚀 Confirm & Buy PlayStation ₹{denomination:,}"
     keyboard = [
@@ -127,7 +127,7 @@ def get_confirmation_keyboard(platform: str = "rooter", denomination: int = 4000
     ]
     return InlineKeyboardMarkup(keyboard)
 
-def get_alternate_platform_keyboard(current_platform: str = "rooter", denomination: int = 4000) -> InlineKeyboardMarkup:
+def get_alternate_platform_keyboard(current_platform: str = "rooter", denomination: int = 5000) -> InlineKeyboardMarkup:
     """Menu navigation fallback."""
     keyboard = [
         [

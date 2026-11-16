@@ -42,7 +42,7 @@ class RooterService(BasePlatform):
             "type": "playstation",
             "name": "PlayStation Gift Card",
             "url": self.playstation_url,
-            "expected_price": float(denomination) if denomination > 0 else float(getattr(config, "TARGET_DENOMINATION", 4000)),
+            "expected_price": float(denomination) if denomination > 0 else float(getattr(config, "TARGET_DENOMINATION", 5000)),
         }
 
     async def check_login_status(self, page: Page) -> bool:
@@ -170,7 +170,7 @@ class RooterService(BasePlatform):
                 in_stock=True,
             ))
 
-        supported = [getattr(config, 'TARGET_DENOMINATION', 4000)]
+        supported = [getattr(config, 'TARGET_DENOMINATION', 5000)]
         for d in supported:
             opt_locator = page.locator("div, span, p").filter(has_text=re.compile(rf"Rs\.?\s*{d}\s*Wallet Code", re.IGNORECASE))
             in_stock = False
@@ -260,7 +260,7 @@ class RooterService(BasePlatform):
         return in_stock_list
 
     async def find_available_playstation_denomination(self, page: Page) -> Optional[int]:
-        """Finds the highest PlayStation denomination currently in stock on Rooter (₹4k -> ₹1k)."""
+        """Finds the highest PlayStation denomination currently in stock on Rooter (₹5k -> ₹1k)."""
         denoms = await self.get_in_stock_playstation_denominations(page)
         return denoms[0] if denoms else None
 
@@ -353,68 +353,54 @@ class RooterService(BasePlatform):
                         message=f"Rooter {prod_name} ₹{denomination:,} is currently Out of Stock!",
                     )
 
-                # Select the exact Mantine chip for this denomination using React synthetic props
+                # Select the exact Mantine chip for this denomination using Double-Action:
+                # 1) Physical pixel coordinate click on chip center
+                # 2) Direct Rooter React Fiber onSelectVariation(obj) state update
+                # 3) 600ms settle wait for React state and DOM sync
                 try:
-                    await page.evaluate("""(targetDenom) => {
+                    chip_root = page.locator(".mantine-Chip-root").filter(
+                        has_text=re.compile(rf"Rs\.?\s*{denomination}\s*Wallet Code", re.IGNORECASE)
+                    ).first
+                    if await chip_root.count() > 0:
+                        await chip_root.scroll_into_view_if_needed(timeout=2000)
+                        box = await chip_root.bounding_box()
+                        if box:
+                            cx = box['x'] + box['width'] / 2
+                            cy = box['y'] + box['height'] / 2
+                            await page.mouse.click(cx, cy)
+                            logger.info(f"[Rooter] Pixel click executed on ₹{denomination:,} chip at ({cx:.1f}, {cy:.1f})")
+                except Exception as pe:
+                    logger.debug(f"Pixel click notice: {pe}")
+
+                # Call React Fiber onSelectVariation(obj) directly on Rooter component
+                try:
+                    fiber_select_res = await page.evaluate("""(targetDenom) => {
                         const chips = Array.from(document.querySelectorAll('.mantine-Chip-root'));
-                        let matchedRoot = null;
-                        let matchedInput = null;
-                        let matchedLabel = null;
-
-                        for (const root of chips) {
-                            const text = (root.innerText || root.textContent || '').toLowerCase();
-                            if (new RegExp(targetDenom + '\\\\s*wallet\\\\s*code', 'i').test(text)) {
-                                matchedRoot = root;
-                                matchedInput = root.querySelector('input');
-                                matchedLabel = root.querySelector('label');
-                                break;
-                            }
-                        }
-
-                        if (matchedRoot) {
-                            matchedRoot.scrollIntoView({ block: 'center' });
-
-                            // 1. Unset disabled attributes so click and change events register
-                            if (matchedInput) {
-                                matchedInput.disabled = false;
-                                matchedInput.removeAttribute('disabled');
-                            }
-                            matchedRoot.removeAttribute('data-disabled');
-                            if (matchedLabel) {
-                                matchedLabel.removeAttribute('data-disabled');
-                                matchedLabel.style.pointerEvents = 'auto';
-                            }
-
-                            // 2. Trigger React synthetic event handlers on the hidden radio input
-                            if (matchedInput) {
-                                const key = Object.keys(matchedInput).find(k => k.startsWith('__reactProps$') || k.startsWith('__reactFiber$'));
-                                if (key && matchedInput[key]) {
-                                    const props = matchedInput[key];
-                                    if (typeof props.onClick === 'function') {
-                                        try { props.onClick({ target: matchedInput, currentTarget: matchedInput }); } catch (e) {}
-                                    }
-                                    if (typeof props.onChange === 'function') {
-                                        try { props.onChange({ target: matchedInput, currentTarget: matchedInput, nativeEvent: new Event('change') }); } catch (e) {}
+                        for (const chip of chips) {
+                            const k = Object.keys(chip).find(x => x.startsWith('__reactFiber$'));
+                            let curr = chip[k];
+                            while (curr) {
+                                if (curr.memoizedProps && curr.memoizedProps.onSelectVariation) {
+                                    const p = curr.memoizedProps;
+                                    const text = (p.obj && p.obj.name ? p.obj.name : chip.innerText || '').toLowerCase();
+                                    if (new RegExp(targetDenom + '\\\\s*wallet\\\\s*code', 'i').test(text)) {
+                                        p.onSelectVariation(p.obj);
+                                        return { success: true, name: p.obj.name, id: p.obj.id };
                                     }
                                 }
-                                try { matchedInput.click(); } catch (e) {}
-                                try {
-                                    matchedInput.checked = true;
-                                    matchedInput.dispatchEvent(new Event('change', { bubbles: true }));
-                                } catch (e) {}
+                                curr = curr.return;
                             }
-
-                            // 3. Fallback click on label and root
-                            if (matchedLabel) {
-                                try { matchedLabel.click(); } catch (e) {}
-                            }
-                            try { matchedRoot.click(); } catch (e) {}
                         }
+                        return { success: false };
                     }""", denomination)
-                except Exception as ce:
-                    logger.debug(f"Card click evaluation notice: {ce}")
+                    logger.info(f"[Rooter] React Fiber onSelectVariation result: {fiber_select_res}")
+                except Exception as fe:
+                    logger.debug(f"Fiber onSelectVariation notice: {fe}")
 
-                # Native Playwright click on the exact chip label for React state sync
+                # Allow 600ms for React state, payable price, and Mantine chip DOM to fully settle
+                await page.wait_for_timeout(600)
+
+                # Fallback: Playwright native click on chip label
                 try:
                     chip_root = page.locator(".mantine-Chip-root").filter(
                         has_text=re.compile(rf"Rs\.?\s*{denomination}\s*Wallet Code", re.IGNORECASE)
@@ -422,37 +408,50 @@ class RooterService(BasePlatform):
                     if await chip_root.count() > 0:
                         lbl = chip_root.locator("label").first
                         if await lbl.count() > 0:
-                            await lbl.click(force=True, timeout=1200)
+                            await lbl.click(force=True, timeout=1000)
                 except Exception:
                     pass
-                await page.wait_for_timeout(250)
+                await page.wait_for_timeout(200)
 
-                # Verify active chip on page matches requested denomination (Pre-Checkout 4K Guard)
+                # Verify active chip on page matches requested denomination (Pre-Checkout Strict Guard)
                 try:
-                    selected_chip_denom = await page.evaluate("""() => {
+                    selected_info = await page.evaluate("""() => {
                         const chips = Array.from(document.querySelectorAll('.mantine-Chip-root'));
                         for (const root of chips) {
+                            const k = Object.keys(root).find(x => x.startsWith('__reactFiber$'));
+                            let curr = root[k];
+                            let p = null;
+                            while (curr) {
+                                if (curr.memoizedProps && curr.memoizedProps.onSelectVariation) {
+                                    p = curr.memoizedProps;
+                                    break;
+                                }
+                                curr = curr.return;
+                            }
                             const inp = root.querySelector('input');
                             const lbl = root.querySelector('label');
-                            const isChecked = (inp && inp.checked) || (lbl && lbl.getAttribute('data-checked') === 'true') || root.getAttribute('data-selected') === 'true';
-                            if (isChecked) {
-                                const m = (root.innerText || '').match(/Rs\.?\s*([0-9]+)\s*Wallet Code/i);
+                            const isSelected = (p && p.obj && p.selectedChip === p.obj.id) ||
+                                              (inp && inp.checked) ||
+                                              (lbl && lbl.getAttribute('data-checked') === 'true') ||
+                                              (root.getAttribute('data-selected') === 'true');
+                            if (isSelected) {
+                                const m = (root.innerText || (p && p.obj ? p.obj.name : '')).match(/Rs\.?\s*([0-9]+)\s*Wallet Code/i);
                                 if (m) return parseInt(m[1]);
                             }
                         }
                         return null;
                     }""")
-                    if selected_chip_denom is not None:
-                        logger.info(f"[Rooter] Selected chip denomination on page verified: ₹{selected_chip_denom}")
-                        if denomination == 4000 and selected_chip_denom != 4000:
-                            logger.error(f"[Rooter] STRICT 4K GUARD: Selected chip is ₹{selected_chip_denom} instead of ₹4,000! Aborting.")
+                    if selected_info is not None:
+                        logger.info(f"[Rooter] Selected chip denomination on page verified: ₹{selected_info}")
+                        if denomination > 0 and selected_info != denomination:
+                            logger.error(f"[Rooter] STRICT GUARD: Selected chip is ₹{selected_info} instead of ₹{denomination:,}! Aborting.")
                             return PurchaseResult(
                                 success=False,
                                 platform="rooter",
                                 denomination=denomination,
                                 quantity=quantity,
                                 account_label=account_label,
-                                message=f"Strict 4K Guard: Page kept ₹{selected_chip_denom} chip selected instead of ₹4,000. Aborted purchase to prevent 1K buy.",
+                                message=f"Strict Guard: Page kept ₹{selected_info} chip selected instead of ₹{denomination:,}. Aborted purchase to prevent wrong buy.",
                                 error_screenshot=shot_path,
                             )
                 except Exception as ve:
@@ -474,13 +473,26 @@ class RooterService(BasePlatform):
                         match_price = re.search(r"(?:Pay\s*₹?|₹\s*)([0-9,]+(?:\.[0-9]+)?)", btn_text, re.IGNORECASE)
                         if match_price:
                             btn_val = float(match_price.group(1).replace(",", ""))
-                            if denomination == 4000 and btn_val < 3500:
+                            if denomination == 5000 and btn_val < 4500:
+                                await page.wait_for_timeout(150)
+                                continue
+                            elif denomination == 4000 and btn_val < 3500:
                                 await page.wait_for_timeout(150)
                                 continue
                         break
                     if btn_val is not None:
                         logger.info(f"[Rooter] Bottom button payable amount detected: ₹{btn_val}")
-                        if denomination == 4000 and btn_val < 3500:
+                        if denomination == 5000 and btn_val < 4500:
+                            logger.error(f"[Rooter] STRICT 5K GUARD: Bottom button payable shows ₹{btn_val} (< ₹4,500). Aborting to prevent wrong buy!")
+                            return PurchaseResult(
+                                success=False,
+                                platform="rooter",
+                                denomination=denomination,
+                                quantity=quantity,
+                                account_label=account_label,
+                                message=f"Strict 5K Guard: Payable amount is ₹{btn_val:,.0f} (< ₹4,500). Aborted to prevent wrong buy.",
+                            )
+                        elif denomination == 4000 and btn_val < 3500:
                             logger.error(f"[Rooter] STRICT 4K GUARD: Bottom button payable shows ₹{btn_val} (< ₹3,500). Aborting to prevent 1K purchase!")
                             return PurchaseResult(
                                 success=False,
@@ -594,7 +606,7 @@ class RooterService(BasePlatform):
                             pass
                         await page.wait_for_timeout(250)
 
-            # 3. Inspect Delivery Details / Checkout modal to confirm exact item (Strict 4K Guard)
+            # 3. Inspect Delivery Details / Checkout modal to confirm exact item (Strict 5K Guard)
             modal_text = ""
             try:
                 if await modal_root.is_visible(timeout=600):
@@ -612,15 +624,15 @@ class RooterService(BasePlatform):
             m_denom_match = re.search(r"Rs\.?\s*([0-9]+)\s*Wallet Code", modal_text, re.IGNORECASE)
             if m_denom_match:
                 modal_val = int(m_denom_match.group(1))
-                if denomination == 4000 and modal_val != 4000:
-                    logger.error(f"[Rooter] CRITICAL 4K GUARD: Wanted ₹4,000 but modal shows Rs.{modal_val} Wallet Code! ABORTING to prevent 1K purchase.")
+                if denomination > 0 and modal_val != denomination:
+                    logger.error(f"[Rooter] CRITICAL GUARD: Wanted ₹{denomination:,} but modal shows Rs.{modal_val} Wallet Code! ABORTING to prevent wrong buy.")
                     return PurchaseResult(
                         success=False,
                         platform="rooter",
                         denomination=denomination,
                         quantity=quantity,
                         account_label=account_label,
-                        message=f"Strict 4K Guard: Rooter checkout modal selected ₹{modal_val} instead of ₹4,000! Aborted purchase to prevent 1K buy.",
+                        message=f"Strict Guard: Rooter checkout modal selected ₹{modal_val} instead of ₹{denomination:,}! Aborted purchase to prevent wrong buy.",
                         error_screenshot=shot_path,
                     )
                 logger.info(f"[Rooter] Checkout modal item confirmed: Rs.{modal_val} Wallet Code. Proceeding with purchase!")
@@ -799,7 +811,7 @@ class RooterService(BasePlatform):
                     await page.wait_for_timeout(2500)
 
                     # Click top order card to view coupon code
-                    order_card = page.locator("text='PlayStation Gift Card', text='PlayStation Gift Cards', text='Rs.4000 Wallet Code', text='Google Play Recharge Code', div[class*='order']").first
+                    order_card = page.locator("text='PlayStation Gift Card', text='PlayStation Gift Cards', text='Rs.5000 Wallet Code', text='Rs.4000 Wallet Code', text='Google Play Recharge Code', div[class*='order']").first
                     if await order_card.is_visible(timeout=3000):
                         await order_card.click()
                         await page.wait_for_timeout(2000)
