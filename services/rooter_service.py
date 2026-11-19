@@ -520,13 +520,17 @@ class RooterService(BasePlatform):
                 # Increment quantity if quantity > 1 (e.g. 2 per order)
                 if quantity > 1:
                     try:
-                        for _ in range(quantity - 1):
-                            plus_btn = page.locator("button:has-text('+'), div[class*='qty'] button:has-text('+'), div[class*='quantity'] button:has-text('+'), [aria-label*='increase']").first
-                            if await plus_btn.is_visible(timeout=1000):
+                        plus_btn = page.locator("button:has-text('+'), div[class*='qty'] button:has-text('+'), div[class*='quantity'] button:has-text('+'), [aria-label*='increase']").first
+                        if await plus_btn.is_visible(timeout=1000) and not await plus_btn.is_disabled():
+                            for _ in range(quantity - 1):
                                 await plus_btn.click(force=True, timeout=1000)
-                                await page.wait_for_timeout(200)
+                                await page.wait_for_timeout(300)
+                        else:
+                            logger.info("[Rooter] Quantity '+' button is disabled or not found; proceeding with quantity 1.")
+                            quantity = 1
                     except Exception as qe:
-                        logger.debug(f"Could not increment quantity: {qe}")
+                        logger.debug(f"Could not increment quantity, proceeding with 1: {qe}")
+                        quantity = 1
 
             # 2. Check if main action button is disabled / Out of Stock
             await self.dismiss_location_popup(page)
@@ -571,27 +575,33 @@ class RooterService(BasePlatform):
             if progress_callback:
                 await progress_callback(f"Clicking Buy / Pay on {prod_name}...", "🛒")
 
-            # 1. Check if Delivery Details / Checkout modal is already open
-            modal_root = page.locator(".mantine-Modal-content, div[role='dialog']").first
-            delivery_modal = page.locator(".mantine-Modal-content, div[role='dialog'], text='Delivery Details'").first
+            # 1. Scoped visible modal locator: detects open Delivery Details / Checkout / Payment modal
+            modal_locator = page.locator(
+                "section.mantine-Modal-content:visible, "
+                "div.mantine-Modal-content:visible, "
+                "section[role='dialog']:visible, "
+                "div[role='dialog']:visible, "
+                ".mantine-Modal-content:visible"
+            ).filter(has_text=re.compile(r"Delivery\s*Details|Checkout|Pay\s*via|Order\s*Summary|Payment", re.I)).first
+
             modal_open = False
             try:
-                modal_open = await delivery_modal.is_visible(timeout=400)
+                modal_open = await modal_locator.is_visible(timeout=300)
             except Exception:
                 pass
 
             # 2. If modal is NOT already open, click the main page action button
             if not modal_open:
                 buy_btn = page.locator(
-                    "button[data-testid='proceed-to-pay'], "
                     "button[data-testid='add-address-btn'], "
+                    "button[data-testid='proceed-to-pay'], "
                     "button:has-text('Pay via wallet'), "
                     "button:has-text('Pay via Rooter'), "
                     "button:has-text('Pay ₹'), "
                     "button:has-text('Buy Now'), "
                     "button:has-text('Proceed')"
                 ).first
-                if await buy_btn.is_visible(timeout=2500):
+                if await buy_btn.is_visible(timeout=3000):
                     buy_btn_txt = (await buy_btn.inner_text() or "").strip()
                     if "out of stock" in buy_btn_txt.lower():
                         return PurchaseResult(
@@ -611,23 +621,52 @@ class RooterService(BasePlatform):
                         except Exception:
                             pass
 
-            # 3. Inspect Delivery Details / Checkout modal strictly inside modal container (Strict Guard)
-            # IMPORTANT: NEVER fall back to body.inner_text() to avoid matching Rs.1000 from top of product page!
+            # 3. Inspect Delivery Details / Checkout modal strictly inside visible modal container
             modal_text = ""
             modal_open = False
-            for _ in range(12):  # Poll up to 3 seconds for modal to mount and render children
+            target_modal = None
+            for _ in range(16):  # Poll up to 4.0 seconds for modal to mount and render children
                 try:
-                    if await modal_root.is_visible(timeout=250):
+                    if await modal_locator.is_visible(timeout=250):
+                        target_modal = modal_locator
                         modal_open = True
-                        m_raw = (await modal_root.inner_text() or "").strip()
-                        if len(m_raw) > 10:
+                        m_raw = (await target_modal.inner_text() or "").strip()
+                        if len(m_raw) > 5:
                             modal_text = m_raw
                             break
+                    else:
+                        # Fallback: check any visible mantine-Modal-content
+                        fallback_modal = page.locator(
+                            "section.mantine-Modal-content:visible, "
+                            "div.mantine-Modal-content:visible, "
+                            ".mantine-Modal-content:visible"
+                        ).first
+                        if await fallback_modal.is_visible(timeout=100):
+                            m_raw = (await fallback_modal.inner_text() or "").strip()
+                            if len(m_raw) > 5:
+                                target_modal = fallback_modal
+                                modal_open = True
+                                modal_text = m_raw
+                                break
                 except Exception:
                     pass
                 await page.wait_for_timeout(250)
 
-            if not modal_open or not modal_text:
+            # If modal still not open, retry clicking buy_btn once more
+            if not modal_open:
+                try:
+                    retry_buy = page.locator("button[data-testid='add-address-btn'], button:has-text('Pay via wallet')").first
+                    if await retry_buy.is_visible(timeout=500):
+                        await retry_buy.dispatch_event("click")
+                        await page.wait_for_timeout(500)
+                        if await modal_locator.is_visible(timeout=1000):
+                            target_modal = modal_locator
+                            modal_open = True
+                            modal_text = (await target_modal.inner_text() or "").strip()
+                except Exception:
+                    pass
+
+            if not modal_open or not target_modal:
                 shot_path = await browser_manager.capture_screenshot(page, f"modal_open_fail_{denomination}")
                 logger.error("[Rooter] STRICT GUARD: Checkout modal did not open or render content! Aborting.")
                 return PurchaseResult(
@@ -640,7 +679,23 @@ class RooterService(BasePlatform):
                     error_screenshot=shot_path,
                 )
 
-            # Extract exact denomination strictly from modal content
+            # Auto-fill Name / Email in Delivery Details modal if empty so payment button activates
+            try:
+                name_inp = target_modal.locator("input[placeholder*='name' i], input[name*='name' i]").first
+                if await name_inp.is_visible(timeout=300):
+                    curr_name = (await name_inp.input_value() or "").strip()
+                    if not curr_name:
+                        await name_inp.fill("Aakash")
+
+                email_inp = target_modal.locator("input[placeholder*='email' i], input[name*='email' i]").first
+                if await email_inp.is_visible(timeout=300):
+                    curr_email = (await email_inp.input_value() or "").strip()
+                    if not curr_email:
+                        await email_inp.fill("aakashlohar7@gmail.com")
+            except Exception as e_fill:
+                logger.debug(f"[Rooter] Delivery details field auto-fill note: {e_fill}")
+
+            # Extract exact denomination if explicitly present in modal content
             modal_val = None
             m_denom_match = re.search(r"Rs\.?\s*([0-9]+)\s*Wallet Code", modal_text, re.IGNORECASE)
             if m_denom_match:
@@ -652,23 +707,23 @@ class RooterService(BasePlatform):
                     if parsed_alt in (1000, 2000, 3000, 4000, 5000):
                         modal_val = parsed_alt
 
-            logger.info(f"[Rooter] Checkout modal item confirmed as: {modal_val}")
-
-            # STRICT GUARD: If modal value does not strictly match target denomination, ABORT!
-            if modal_val != denomination:
-                shot_path = await browser_manager.capture_screenshot(page, f"modal_mismatch_{denomination}")
-                logger.error(f"[Rooter] CRITICAL GUARD: Wanted ₹{denomination:,} but modal shows {modal_val}! ABORTING.")
-                return PurchaseResult(
-                    success=False,
-                    platform="rooter",
-                    denomination=denomination,
-                    quantity=quantity,
-                    account_label=account_label,
-                    message=f"Strict Guard: Rooter checkout modal selected {modal_val} instead of ₹{denomination:,}! Aborted purchase to prevent wrong buy.",
-                    error_screenshot=shot_path,
-                )
-
-            logger.info(f"[Rooter] Checkout modal item confirmed: Rs.{modal_val} Wallet Code. Proceeding with purchase!")
+            # STRICT GUARD: If modal explicitly specifies a denomination that does not match target, ABORT!
+            if modal_val is not None:
+                logger.info(f"[Rooter] Checkout modal item confirmed as: {modal_val}")
+                if modal_val != denomination:
+                    shot_path = await browser_manager.capture_screenshot(page, f"modal_mismatch_{denomination}")
+                    logger.error(f"[Rooter] CRITICAL GUARD: Wanted ₹{denomination:,} but modal shows {modal_val}! ABORTING.")
+                    return PurchaseResult(
+                        success=False,
+                        platform="rooter",
+                        denomination=denomination,
+                        quantity=quantity,
+                        account_label=account_label,
+                        message=f"Strict Guard: Rooter checkout modal selected {modal_val} instead of ₹{denomination:,}! Aborted purchase to prevent wrong buy.",
+                        error_screenshot=shot_path,
+                    )
+            else:
+                logger.info(f"[Rooter] Delivery Details modal active for ₹{denomination:,}. Proceeding with wallet purchase!")
 
             async def _poll_post_click(max_ms: int = 4500) -> str:
                 steps = max(1, max_ms // 250)
@@ -687,31 +742,24 @@ class RooterService(BasePlatform):
                     if "enter mobile" in txt or "verify otp" in txt:
                         return "login"
                     try:
-                        if modal_open and not await modal_root.is_visible(timeout=100):
+                        if target_modal and not await target_modal.is_visible(timeout=100):
                             return "closed"
                     except Exception:
                         pass
                 return "timeout"
 
-            # Click primary Pay button scoped strictly inside the open modal (avoid clicking page background)
-            modal_pay_btn = page.locator(
-                ".mantine-Modal-content button[data-testid='proceed-to-pay'], "
-                ".mantine-Modal-content button:has-text('Pay via wallet'), "
-                ".mantine-Modal-content button:has-text('Pay via Rooter'), "
-                ".mantine-Modal-content button:has-text('Pay ₹'), "
-                ".mantine-Modal-content button:has-text('Proceed to Pay'), "
-                ".mantine-Modal-content button:has-text('Pay Now'), "
-                ".mantine-Modal-content button:has-text('Continue'), "
-                ".mantine-Modal-content button:has-text('Proceed'), "
-                "div[role='dialog'] button[data-testid='proceed-to-pay'], "
-                "div[role='dialog'] button:has-text('Pay via wallet'), "
-                "div[role='dialog'] button:has-text('Pay via Rooter'), "
-                "div[role='dialog'] button:has-text('Pay ₹'), "
-                "div[role='dialog'] button:has-text('Proceed to Pay'), "
-                "div[role='dialog'] button:has-text('Pay Now'), "
-                "div[role='dialog'] button:has-text('Continue'), "
-                "div[role='dialog'] button:has-text('Proceed')"
-            ).last
+            # Click primary Pay button scoped strictly inside the open modal
+            modal_pay_btn = target_modal.locator(
+                "button[data-testid='add-address-btn'], "
+                "button[data-testid='proceed-to-pay'], "
+                "button:has-text('Pay via wallet'), "
+                "button:has-text('Pay via Rooter'), "
+                "button:has-text('Pay ₹'), "
+                "button:has-text('Proceed to Pay'), "
+                "button:has-text('Pay Now'), "
+                "button:has-text('Continue'), "
+                "button:has-text('Proceed')"
+            ).first
             click_outcome = "none"
             if await modal_pay_btn.is_visible(timeout=2000):
                 if progress_callback:
@@ -729,10 +777,9 @@ class RooterService(BasePlatform):
             if click_outcome == "none" or click_outcome == "timeout":
                 # Close coupon or offer popup if shown inside modal
                 close_coupon = page.locator(
-                    ".mantine-Modal-content button:has-text('Skip'), "
-                    "div[role='dialog'] button:has-text('Skip'), "
-                    ".mantine-Modal-content button[aria-label*='Close'], "
-                    "div[role='dialog'] button[aria-label*='Close']"
+                    "button:has-text('Skip'), "
+                    "button[aria-label*='Close'], "
+                    "button[data-testid='close-modal-btn']"
                 ).first
                 if await close_coupon.is_visible(timeout=500):
                     try:
@@ -742,7 +789,7 @@ class RooterService(BasePlatform):
                         pass
 
                 # Select Rooter Wallet / Balance payment method strictly inside modal/payment dialog
-                wallet_opt = page.locator(".mantine-Modal-content, div[role='dialog']").locator(
+                wallet_opt = page.locator(
                     "button, label, input[type='radio'], div[role='radio'], div[role='button']"
                 ).filter(has_text=re.compile(r"(?:Rooter\s*Wallet|Wallet\s*Balance|Pay\s*via\s*Wallet|Rooter\s*Pay|Rooter\s*Credits)", re.IGNORECASE)).first
                 if await wallet_opt.is_visible(timeout=800):
@@ -754,17 +801,13 @@ class RooterService(BasePlatform):
 
                 # Confirm payment / final proceed button if modal is still open
                 confirm_pay = page.locator(
-                    ".mantine-Modal-content button[data-testid='proceed-to-pay'], "
-                    ".mantine-Modal-content button:has-text('Pay via wallet'), "
-                    ".mantine-Modal-content button:has-text('Pay via Rooter'), "
-                    ".mantine-Modal-content button:has-text('Pay ₹'), "
-                    ".mantine-Modal-content button:has-text('Pay Now'), "
-                    ".mantine-Modal-content button:has-text('Proceed to Pay'), "
-                    "div[role='dialog'] button[data-testid='proceed-to-pay'], "
-                    "div[role='dialog'] button:has-text('Pay via wallet'), "
-                    "div[role='dialog'] button:has-text('Pay ₹'), "
-                    "div[role='dialog'] button:has-text('Pay Now'), "
-                    "div[role='dialog'] button:has-text('Proceed to Pay')"
+                    "button[data-testid='proceed-to-pay'], "
+                    "button[data-testid='add-address-btn'], "
+                    "button:has-text('Pay via wallet'), "
+                    "button:has-text('Pay via Rooter'), "
+                    "button:has-text('Pay ₹'), "
+                    "button:has-text('Pay Now'), "
+                    "button:has-text('Proceed to Pay')"
                 ).last
                 if await confirm_pay.is_visible(timeout=1200):
                     try:

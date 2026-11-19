@@ -37,8 +37,8 @@ if raw_target in ("4000", "4k", "4", ""):
 TARGET_DENOMINATION = int(raw_target)
 DEFAULT_DENOMINATIONS = [TARGET_DENOMINATION]
 
-# Maximum cards to purchase per account (default: 2 cards = ₹10,000 if balance >= ₹10,000)
-MAX_CARDS_PER_ACCOUNT = int(os.getenv("MAX_CARDS_PER_ACCOUNT", "2"))
+# Maximum cards to purchase per account (default: 1 card per instant strike for maximum speed & reliability)
+MAX_CARDS_PER_ACCOUNT = int(os.getenv("MAX_CARDS_PER_ACCOUNT", "1"))
 
 # Simulation / Dry Run mode (safe mode for testing without real card debit)
 SIMULATION_MODE = os.getenv("SIMULATION_MODE", "False").lower() in ("true", "1", "yes")

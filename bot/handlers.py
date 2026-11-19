@@ -614,16 +614,18 @@ async def run_sniper_loop(
                             unit_cost = ROOTER_CARD_FEES.get(denomination, float(denomination) * 1.102)
                             if bal >= unit_cost or bal == 0:
                                 target_d = denomination
+                                max_q = getattr(config, "MAX_CARDS_PER_ACCOUNT", 1)
                                 affordable_q = int(bal // unit_cost) if bal > 0 else 1
-                                target_q = min(max(affordable_q, 1), 2)
+                                target_q = min(max(affordable_q, 1), max_q)
                     else:
                         # ANY IN-STOCK MODE: "jo amount aara h vhi buy ho"
                         for cand_d in available_denominations:
                             unit_cost = ROOTER_CARD_FEES.get(cand_d, float(cand_d) * 1.102)
                             if bal >= unit_cost or bal == 0:
                                 target_d = cand_d
+                                max_q = getattr(config, "MAX_CARDS_PER_ACCOUNT", 1)
                                 affordable_q = int(bal // unit_cost) if bal > 0 else 1
-                                target_q = min(max(affordable_q, 1), 2)
+                                target_q = min(max(affordable_q, 1), max_q)
                                 break
 
                     if target_d is not None:
