@@ -737,7 +737,7 @@ class RooterService(BasePlatform):
                         return "success"
                     if re.search(r"redeem\s*code|voucher\s*code|gift\s*code", txt):
                         return "success"
-                    if any(k in txt for k in ("insufficient", "not enough balance", "add money", "low balance", "out of stock")):
+                    if any(k in txt for k in ("insufficient", "not enough balance", "add money", "low balance", "out of stock", "recharge", "payment failed", "failed to pay")):
                         return "abort"
                     if "enter mobile" in txt or "verify otp" in txt:
                         return "login"
@@ -823,12 +823,15 @@ class RooterService(BasePlatform):
             body_content = await page.locator("body").inner_text()
 
             # Check for error indicators
-            if "insufficient" in body_content.lower() or "low balance" in body_content.lower():
+            if any(k in body_content.lower() for k in ("insufficient", "low balance", "add money", "recharge", "payment failed", "failed to pay")):
+                cost_est = 6030 if denomination == 5000 else int(denomination * 1.206)
                 return PurchaseResult(
                     success=False,
                     platform="rooter",
                     denomination=denomination,
-                    message="Rooter wallet balance insufficient for this purchase.",
+                    quantity=quantity,
+                    account_label=account_label,
+                    message=f"Rooter wallet balance insufficient for ₹{denomination:,} (Total cost is ₹{cost_est:,} without discount). Please add balance to Rooter wallet.",
                     error_screenshot=shot_path,
                 )
 

@@ -593,11 +593,11 @@ async def run_sniper_loop(
                     }]
 
                 ROOTER_CARD_FEES = {
-                    1000: 1106.0,
-                    2000: 2210.0,
-                    3000: 3310.0,
-                    4000: 4409.0,
-                    5000: 5515.0,
+                    1000: 1206.0,
+                    2000: 2412.0,
+                    3000: 3618.0,
+                    4000: 4824.0,
+                    5000: 6030.0,
                 }
 
                 order_tasks = []
@@ -608,36 +608,32 @@ async def run_sniper_loop(
                     target_q = 1
 
                     if denomination > 0:
-                        # STRICT DENOMINATION MODE: e.g. /snipe 4000 or /snipe 1000
+                        # STRICT DENOMINATION MODE: e.g. /snipe 5000 or /snipe 1000
                         # Strictly buys only the requested denomination!
                         if denomination in available_denominations:
-                            unit_cost = ROOTER_CARD_FEES.get(denomination, float(denomination) * 1.102)
+                            unit_cost = ROOTER_CARD_FEES.get(denomination, float(denomination) * 1.206)
                             if bal >= unit_cost or bal == 0:
                                 target_d = denomination
-                                max_q = getattr(config, "MAX_CARDS_PER_ACCOUNT", 1)
-                                affordable_q = int(bal // unit_cost) if bal > 0 else 1
-                                target_q = min(max(affordable_q, 1), max_q)
+                                target_q = 1
                     else:
                         # ANY IN-STOCK MODE: "jo amount aara h vhi buy ho"
                         for cand_d in available_denominations:
-                            unit_cost = ROOTER_CARD_FEES.get(cand_d, float(cand_d) * 1.102)
+                            unit_cost = ROOTER_CARD_FEES.get(cand_d, float(cand_d) * 1.206)
                             if bal >= unit_cost or bal == 0:
                                 target_d = cand_d
-                                max_q = getattr(config, "MAX_CARDS_PER_ACCOUNT", 1)
-                                affordable_q = int(bal // unit_cost) if bal > 0 else 1
-                                target_q = min(max(affordable_q, 1), max_q)
+                                target_q = 1
                                 break
 
                     if target_d is not None:
                         order_tasks.append((acc, target_d, target_q))
                     else:
                         req_target = denomination if denomination > 0 else (min(available_denominations) if available_denominations else 1000)
-                        req_cost = ROOTER_CARD_FEES.get(req_target, float(req_target) * 1.102)
+                        req_cost = ROOTER_CARD_FEES.get(req_target, float(req_target) * 1.206)
                         logger.info(f"[Sniper] Account {acc_label} skipped: Balance ₹{bal:,.0f} < target card ₹{req_target:,} (₹{req_cost:,.0f} with fees)")
                         try:
                             await bot.send_message(
                                 chat_id=chat_id,
-                                text=f"⚠️ <b>{html.escape(acc_label)} Skipped:</b> Balance ₹{bal:,.0f} is insufficient for card ₹{req_target:,} (Total: ₹{req_cost:,.0f}).",
+                                text=f"⚠️ <b>{html.escape(acc_label)} Skipped:</b> Balance ₹{bal:,.0f} is insufficient for card ₹{req_target:,} (Total required: ₹{req_cost:,.0f} without discount).",
                                 parse_mode=ParseMode.HTML,
                             )
                         except Exception:
@@ -730,7 +726,7 @@ async def run_sniper_loop(
                         any_success = True
                         sim_badge = " [SIMULATED TEST]" if result.simulation else ""
                         real_denom = result.denomination or d_val
-                        fee_per_card = ROOTER_CARD_FEES.get(real_denom, float(real_denom) * 1.102)
+                        fee_per_card = ROOTER_CARD_FEES.get(real_denom, float(real_denom) * 1.206)
                         total_paid = fee_per_card * result.quantity
                         account_manager.deduct_balance(acc_data.get("id"), total_paid)
                         # Fix: rem_bal must be AFTER deduction, not before
